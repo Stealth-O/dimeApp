@@ -247,14 +247,16 @@ struct ActualBudgetView: View {
 
 struct MainBudgetView: View {
     let budget: MainBudget
-    @FetchRequest<Transaction> private var transactions: FetchedResults<Transaction>
 
     @Environment(\.managedObjectContext) var moc
     @EnvironmentObject var dataController: DataController
 
     @State var toEdit: MainBudget?
     @State var toDelete: MainBudget?
-    @State var totalSpent: Double = 0
+    var totalSpent: Double {
+        ExpenseTotals.spent(dataController.expenseState.expenses,
+                            from: budget.wrappedDate, through: Date.now)
+    }
 
     var soloBudget: Bool
 
@@ -395,7 +397,7 @@ struct MainBudgetView: View {
                         .frame(width: width, height: width / 2)
 
                     if totalSpent / budgetAmount < 0.97 {
-                        AnimatedCurvedBarGraphMainBudget(transactions: transactions, budgetTotal: budgetAmount, cornerRadius: 6.5, width: soloBudget ? 35 : 25)
+                        AnimatedCurvedBarGraphMainBudget(totalSpent: totalSpent, budgetTotal: budgetAmount, cornerRadius: 6.5, width: soloBudget ? 35 : 25)
                             .frame(width: width, height: width / 2)
                     }
                 }
@@ -466,18 +468,6 @@ struct MainBudgetView: View {
                 Label("Delete", systemImage: "xmark.bin")
             }
         }
-        .onAppear {
-            if budget.isFault {
-                return
-            }
-
-            var holdingTotal = 0.0
-            transactions.forEach { transaction in
-                holdingTotal += transaction.wrappedAmount
-            }
-
-            totalSpent = holdingTotal
-        }
         .sheet(item: $toEdit, onDismiss: {
             toEdit = nil
         }) { budget in
@@ -494,24 +484,19 @@ struct MainBudgetView: View {
         self.budget = budget
         soloBudget = solo
 
-        let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), budget.wrappedDate as CVarArg)
-        let endPredicate = NSPredicate(format: "%K <= %@", #keyPath(Transaction.date), Date.now as CVarArg)
-        let incomePredicate = NSPredicate(format: "income = %d", false)
-
-        let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate, incomePredicate])
-
-        _transactions = FetchRequest<Transaction>(sortDescriptors: [], predicate: andPredicate)
     }
 }
 
 struct SingleBudgetView: View {
     let budget: Budget
-    @FetchRequest<Transaction> private var transactions: FetchedResults<Transaction>
 
     @Binding var toDelete: Budget?
     @Binding var toEdit: Budget?
 
-    @State var totalSpent: Double = 0
+    var totalSpent: Double {
+        ExpenseTotals.spent(dataController.expenseState.expenses, from: budget.wrappedDate,
+                            through: Date.now, category: budget.category?.objectID.uriRepresentation())
+    }
 
     var budgetRows: Bool
 
@@ -885,18 +870,6 @@ struct SingleBudgetView: View {
                 }
             }
         }
-        .onAppear {
-            if budget.isFault {
-                return
-            }
-
-            var holdingTotal = 0.0
-            transactions.forEach { transaction in
-                holdingTotal += transaction.wrappedAmount
-            }
-
-            totalSpent = holdingTotal
-        }
     }
 
     init(budget: Budget, toDelete: Binding<Budget?>?, toEdit: Binding<Budget?>?, budgetRows: Bool) {
@@ -905,24 +878,6 @@ struct SingleBudgetView: View {
         _toDelete = toDelete ?? Binding.constant(nil)
         _toEdit = toEdit ?? Binding.constant(nil)
 
-        let date = budget.startDate ?? Date.now
-
-        let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), date as CVarArg)
-        let endPredicate = NSPredicate(format: "%K <= %@", #keyPath(Transaction.date), Date.now as CVarArg)
-        let incomePredicate = NSPredicate(format: "income = %d", false)
-
-        let andPredicate: NSCompoundPredicate
-
-        if let category = budget.category {
-            let categoryPredicate = NSPredicate(format: "%K == %@", #keyPath(Transaction.category), category)
-            andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate, categoryPredicate, incomePredicate])
-
-            _transactions = FetchRequest<Transaction>(sortDescriptors: [], predicate: andPredicate)
-        } else {
-            andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate, incomePredicate])
-
-            _transactions = FetchRequest<Transaction>(sortDescriptors: [], predicate: andPredicate)
-        }
     }
 }
 
@@ -2245,34 +2200,28 @@ struct AnimatedCurvedBarGraphBudget: View {
 }
 
 struct AnimatedCurvedBarGraphMainBudget: View {
-    var transactions: FetchedResults<Transaction>
+    var totalSpent: Double
     var budgetTotal: Double
     let cornerRadius: Double
     let width: Double
-
     @State var percent: Double = 0
-
     @AppStorage("animated", store: UserDefaults(suiteName: "group.com.rafaelsoh.dime")) var animated: Bool = true
+
+    private var targetPercent: Double { budgetTotal == 0 ? 0 : 1 - totalSpent / budgetTotal }
 
     var body: some View {
         DonutSemicircle(percent: percent, cornerRadius: cornerRadius, width: width)
             .fill(Color.DarkBackground)
-            .onAppear {
-                DispatchQueue.main.asyncAfter(deadline: .now()) {
-                    var holdingTotal = 0.0
-                    transactions.forEach { transaction in
-                        holdingTotal += transaction.wrappedAmount
-                    }
+            .onAppear { updatePercent() }
+            .onChange(of: targetPercent) { _ in updatePercent() }
+    }
 
-                    if !animated {
-                        percent = 1 - (holdingTotal / budgetTotal)
-                    } else {
-                        withAnimation(.easeInOut(duration: 0.7)) {
-                            percent = 1 - (holdingTotal / budgetTotal)
-                        }
-                    }
-                }
-            }
+    private func updatePercent() {
+        if animated {
+            withAnimation(.easeInOut(duration: 0.7)) { percent = targetPercent }
+        } else {
+            percent = targetPercent
+        }
     }
 }
 

@@ -1,5 +1,8 @@
 # Dime
 
+> **TheirCore migration fork:** the first expense editor and live budget route use [TheirCore 0.1.1](https://github.com/Stealth-O/TheirCore/tree/0.1.1). The original UI, CoreData schema and GPL-3.0 license are retained. The shared debug scheme runs with an isolated local store. See [migration notes, checks and remaining boundaries](docs/theircore-migration.md).
+
+
 <p align="center">
   <img src="./docs/assets/hero.png" width="451" style="max-width: 100%; height: auto;" />
 </p>
@@ -50,15 +53,14 @@ Dime is a 100% free, open-source personal finance tracker built with iOS design 
 ### Build Steps
 
 - Clone this project either via Xcode or terminal:
-  `git clone https://github.com/rarfell/dimeApp.git`
-- For branch selection use:
-  `--single-branch --branch [branchname]` after `clone`
-- After completion, open `dime.xcodeproj` using Xcode.
-- Please let all dependecies update automatically but we would recommend to run
-  `File > Packages > Resolve Package Versions` to ensure, everything is updated.
+  `git clone --branch codex/theircore-expenses https://github.com/Stealth-O/dimeApp.git`
+- Open `app/dime.xcodeproj` in Xcode, select the shared `dime` scheme and an iOS simulator.
+- Resolve packages using the committed `Package.resolved` versions. TheirCore is pinned to 0.1.1.
+- The debug scheme uses a separate local store. See the [migration notes](docs/theircore-migration.md) for test commands and signed CloudKit builds.
 
 ## Third party dependencies
 
+- [TheirCore](https://github.com/Stealth-O/TheirCore/tree/0.1.1)
 - [Alamofire](https://github.com/Alamofire/Alamofire)
 - [CloudKitSyncMonitor](https://github.com/ggruen/CloudKitSyncMonitor)
 - [ConfettiSwiftUI](https://github.com/simibac/ConfettiSwiftUI)

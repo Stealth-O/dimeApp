@@ -18,6 +18,7 @@ struct TransactionView: View {
 
     @Environment(\.managedObjectContext) var moc
     @EnvironmentObject var dataController: DataController
+    @StateObject private var submission = ExpenseSubmission()
     @Environment(\.dismiss) var dismiss
 
     @Environment(\.colorScheme) var colorScheme
@@ -748,14 +749,9 @@ struct TransactionView: View {
                         Button {
                             deleteMode = false
 
-                            withAnimation {
-                                if let itemToDelete = toDelete {
-                                    moc.delete(itemToDelete)
-                                }
-                                dataController.save()
+                            if let itemToDelete = toDelete {
+                                submission.submit(.delete(itemToDelete.objectID.uriRepresentation()), to: dataController.expenses)
                             }
-
-                            dismiss()
 
                         } label: {
                             Text("Delete")
@@ -920,6 +916,23 @@ struct TransactionView: View {
                     repeatType: $repeatType, repeatCoefficient: $repeatCoefficient, showPicker: $showPicker)
             }
         }
+        .disabled(submission.isSaving)
+        .interactiveDismissDisabled(submission.isSaving)
+        .onChange(of: submission.status) { status in
+            switch status {
+            case .saved:
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                dismiss()
+            case let .failed(message):
+                toastImage = "exclamationmark.triangle"
+                toastTitle = message
+                showToast = true
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            case .idle, .saving:
+                break
+            }
+        }
+        .onDisappear { submission.cancel() }
         .onChange(of: dynamicTypeSize) { _ in
             if income {
                 swipingOffset = capsuleWidth
@@ -1015,91 +1028,10 @@ struct TransactionView: View {
             return
         }
 
-        generator.notificationOccurred(.success)
-
-        if let editedTransaction = toEdit {
-            if note.trimmingCharacters(in: .whitespacesAndNewlines) == "" {
-                editedTransaction.note = category!.wrappedName
-            } else {
-                editedTransaction.note = note.trimmingCharacters(in: .whitespaces)
-            }
-
-            if let unwrappedCategory = category {
-                editedTransaction.category = unwrappedCategory
-            }
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                withAnimation(.easeInOut(duration: 0.5)) {
-                    editedTransaction.amount = price
-                    editedTransaction.date = date
-                    editedTransaction.income = income
-
-                    let calendar = Calendar(identifier: .gregorian)
-
-                    editedTransaction.day =
-                    calendar.date(bySettingHour: 0, minute: 0, second: 0, of: date) ?? Date.now
-
-                    let dateComponents = calendar.dateComponents([.month, .year], from: date)
-
-                    editedTransaction.month = calendar.date(from: dateComponents) ?? Date.now
-
-                    if repeatType > 0 {
-                        editedTransaction.onceRecurring = true
-                        editedTransaction.recurringType = Int16(repeatType)
-                        editedTransaction.recurringCoefficient = Int16(repeatCoefficient)
-
-                        dataController.updateRecurringTransaction(transaction: editedTransaction)
-                    } else {
-                        editedTransaction.onceRecurring = false
-                        editedTransaction.recurringType = Int16(repeatType)
-                        editedTransaction.recurringCoefficient = Int16(repeatCoefficient)
-                    }
-
-                    dataController.save()
-                }
-            }
-
-            dismiss()
-
-            return
-        }
-
-        let transaction = Transaction(context: moc)
-
-        if note.trimmingCharacters(in: .whitespacesAndNewlines) == "" {
-            transaction.note = category?.wrappedName ?? ""
-        } else {
-            transaction.note = note.trimmingCharacters(in: .whitespaces)
-        }
-
-        transaction.income = income
-
-        if let unwrappedCategory = category {
-            transaction.category = unwrappedCategory
-        }
-
-        transaction.amount = price
-        transaction.date = date
-        transaction.id = UUID()
-
-        let calendar = Calendar(identifier: .gregorian)
-
-        transaction.day = calendar.date(bySettingHour: 0, minute: 0, second: 0, of: date) ?? Date.now
-
-        let dateComponents = calendar.dateComponents([.month, .year], from: date)
-
-        transaction.month = calendar.date(from: dateComponents) ?? Date.now
-
-        if repeatType > 0 {
-            transaction.onceRecurring = true
-            transaction.recurringType = Int16(repeatType)
-            transaction.recurringCoefficient = Int16(repeatCoefficient)
-            dataController.updateRecurringTransaction(transaction: transaction)
-        }
-
-        try? moc.save()
-
-        dismiss()
+        let draft = ExpenseDraft(note: note, amount: price, date: date,
+                                 category: category?.objectID.uriRepresentation(), income: income,
+                                 recurringType: repeatType, recurringCoefficient: repeatCoefficient)
+        submission.submit(.save(draft, editing: toEdit?.objectID.uriRepresentation()), to: dataController.expenses)
     }
 
     init(toEdit: Transaction? = nil) {

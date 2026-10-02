@@ -9,6 +9,9 @@ import CoreData
 import Foundation
 import SwiftUI
 import WidgetKit
+#if DIME_THEIRCORE_EXPENSES
+import TheirCore
+#endif
 
 @available(iOS 16, *)
 enum CustomError: Swift.Error, CustomLocalizedStringResourceConvertible {
@@ -30,7 +33,38 @@ enum CustomError: Swift.Error, CustomLocalizedStringResourceConvertible {
 class DataController: ObservableObject {
     static let shared = DataController()
 
+    static var usesLocalStore: Bool {
+#if DEBUG
+        return ProcessInfo.processInfo.environment["DIME_LOCAL_STORE"] == "1"
+#else
+        return false
+#endif
+    }
+
     var container = NSPersistentCloudKitContainer(name: "MainModel")
+
+#if DIME_THEIRCORE_EXPENSES
+    @Published private(set) var expenseState = ExpenseState()
+    private var expenseObservation: Their.HubCancel?
+    private var expenseChanges: NSObjectProtocol?
+
+    @MainActor
+    lazy var expenses: ExpenseStore = {
+        let repository = CoreDataExpenseRepository(context: container.viewContext) {
+            WidgetCenter.shared.reloadAllTimelines()
+        }
+        let store = ExpenseStore(repository: repository)
+        expenseObservation = store.observe { [weak self] snapshot in
+            MainActor.assumeIsolated { self?.expenseState = snapshot }
+        }
+        return store
+    }()
+
+    deinit {
+        expenseObservation?()
+        if let expenseChanges { NotificationCenter.default.removeObserver(expenseChanges) }
+    }
+#endif
 
     init() {
         let description = NSPersistentStoreDescription()
@@ -60,6 +94,14 @@ class DataController: ObservableObject {
             description.url = url.appendingPathComponent("Main.sqlite")
         }
 
+#if DEBUG
+        // The fork's debug scheme uses an isolated local store; release keeps iCloud behavior.
+        if Self.usesLocalStore {
+            description.cloudKitContainerOptions = nil
+            description.url = NSPersistentContainer.defaultDirectoryURL().appendingPathComponent("DimeLocal.sqlite")
+        }
+#endif
+
         container.persistentStoreDescriptions = [description]
 
         container.loadPersistentStores { description, error in
@@ -70,6 +112,17 @@ class DataController: ObservableObject {
 
             self.container.viewContext.automaticallyMergesChangesFromParent = true
         }
+
+#if DIME_THEIRCORE_EXPENSES
+        expenseChanges = NotificationCenter.default.addObserver(forName: .NSManagedObjectContextObjectsDidChange,
+                                                                 object: container.viewContext, queue: nil) { [weak self] notification in
+            let keys = [NSInsertedObjectsKey, NSUpdatedObjectsKey, NSDeletedObjectsKey,
+                        NSRefreshedObjectsKey, NSInvalidatedObjectsKey, NSInvalidatedAllObjectsKey]
+            guard keys.contains(where: { notification.userInfo?[$0] != nil }) else { return }
+            Task { @MainActor [weak self] in self?.expenses.reload() }
+        }
+        Task { @MainActor [weak self] in _ = self?.expenses }
+#endif
 
 //        #if DEBUG
 //            do {

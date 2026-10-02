@@ -158,6 +158,30 @@
 		D63B204B2D8728C300CAFB20 /* Localizable.stringsdict in Resources */ = {isa = PBXBuildFile; fileRef = D63B20482D8728C300CAFB20 /* Localizable.stringsdict */; };
 		D6A4DE202D61744400F7F751 /* SwiftUIIntrospect in Frameworks */ = {isa = PBXBuildFile; productRef = D6A4DE1F2D61744400F7F751 /* SwiftUIIntrospect */; };
 		D6A4DE242D61744400F7F751 /* SwiftUIIntrospect-Static in Frameworks */ = {isa = PBXBuildFile; productRef = D6A4DE232D61744400F7F751 /* SwiftUIIntrospect-Static */; };
+		E10000000000000000000003 /* TheirCore in Frameworks */ = {
+			isa = PBXBuildFile; productRef = E10000000000000000000002 /* TheirCore */;
+		};
+		E10000000000000000000013 /* TheirCore in Frameworks */ = {
+			isa = PBXBuildFile; productRef = E10000000000000000000012 /* TheirCore */;
+		};
+		E10000000000000000000015 /* TheirCoreTesting in Frameworks */ = {
+			isa = PBXBuildFile; productRef = E10000000000000000000014 /* TheirCoreTesting */;
+		};
+		E10000000000000000000030 /* Expense.swift in Sources */ = {
+			isa = PBXBuildFile; fileRef = E10000000000000000000020 /* Expense.swift */;
+		};
+		E10000000000000000000031 /* ExpenseStore.swift in Sources */ = {
+			isa = PBXBuildFile; fileRef = E10000000000000000000021 /* ExpenseStore.swift */;
+		};
+		E10000000000000000000032 /* CoreDataExpenseRepository.swift in Sources */ = {
+			isa = PBXBuildFile; fileRef = E10000000000000000000022 /* CoreDataExpenseRepository.swift */;
+		};
+		E10000000000000000000033 /* ExpenseSubmission.swift in Sources */ = {
+			isa = PBXBuildFile; fileRef = E10000000000000000000023 /* ExpenseSubmission.swift */;
+		};
+		E10000000000000000000007 /* ExpenseTests.swift in Sources */ = {
+			isa = PBXBuildFile; fileRef = E10000000000000000000006 /* ExpenseTests.swift */;
+		};
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -181,6 +205,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 53B1D189288ED7E400E28062;
 			remoteInfo = ExpenditureWidgetExtension;
+		};
+		E10000000000000000000010 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5327D27B287C697400F76ADF /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5327D282287C697400F76ADF;
+			remoteInfo = dime;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -333,6 +364,24 @@
 		AECE7F9D2AED1A6800B57267 /* SuggestedTransactions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SuggestedTransactions.swift; sourceTree = "<group>"; };
 		D63B20472D8728C300CAFB20 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = Localizations/en.lproj/Localizable.strings; sourceTree = "<group>"; };
 		D63B20492D8728C300CAFB20 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.stringsdict; name = en; path = Localizations/en.lproj/Localizable.stringsdict; sourceTree = "<group>"; };
+		E10000000000000000000020 /* Expense.swift */ = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Expense.swift; sourceTree = "<group>";
+		};
+		E10000000000000000000021 /* ExpenseStore.swift */ = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExpenseStore.swift; sourceTree = "<group>";
+		};
+		E10000000000000000000022 /* CoreDataExpenseRepository.swift */ = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreDataExpenseRepository.swift; sourceTree = "<group>";
+		};
+		E10000000000000000000023 /* ExpenseSubmission.swift */ = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExpenseSubmission.swift; sourceTree = "<group>";
+		};
+		E10000000000000000000006 /* ExpenseTests.swift */ = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExpenseTests.swift; sourceTree = "<group>";
+		};
+		E10000000000000000000008 /* DimeExpensesTests.xctest */ = {
+			isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DimeExpensesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR;
+		};
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -366,6 +415,7 @@
 				533A38F42AA49E5900F66957 /* Alamofire in Frameworks */,
 				536715ED28E1E9A3008461F2 /* StoreKit.framework in Frameworks */,
 				53B1D1A8289A60D500E28062 /* CrookedText in Frameworks */,
+				E10000000000000000000003 /* TheirCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -376,6 +426,11 @@
 				53B1D18E288ED7E500E28062 /* SwiftUI.framework in Frameworks */,
 				53B1D18C288ED7E500E28062 /* WidgetKit.framework in Frameworks */,
 			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E1000000000000000000000B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647;
+			files = (E10000000000000000000013 /* TheirCore in Frameworks */, E10000000000000000000015 /* TheirCoreTesting in Frameworks */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -424,6 +479,8 @@
 				5313EC6928ACE941000EAB0C /* BudgetIntentUI */,
 				5327D284287C697400F76ADF /* Products */,
 				5383D85C287D9A0100D1B9BA /* Frameworks */,
+				E10000000000000000000004 /* Expenses */,
+				E10000000000000000000005 /* DimeExpensesTests */,
 			);
 			sourceTree = "<group>";
 		};
@@ -434,6 +491,7 @@
 				53B1D18A288ED7E400E28062 /* ExpenditureWidgetExtension.appex */,
 				5313EC5B28ACE941000EAB0C /* BudgetIntent.appex */,
 				5313EC6628ACE941000EAB0C /* BudgetIntentUI.appex */,
+				E10000000000000000000008 /* DimeExpensesTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -668,6 +726,24 @@
 			path = Transactions;
 			sourceTree = "<group>";
 		};
+		E10000000000000000000004 /* Expenses */ = {
+			isa = PBXGroup;
+			children = (
+				E10000000000000000000020 /* Expense.swift */,
+				E10000000000000000000021 /* ExpenseStore.swift */,
+				E10000000000000000000022 /* CoreDataExpenseRepository.swift */,
+				E10000000000000000000023 /* ExpenseSubmission.swift */,
+			);
+			name = Expenses;
+			path = dime/Features/Expenses;
+			sourceTree = SOURCE_ROOT;
+		};
+		E10000000000000000000005 /* DimeExpensesTests */ = {
+			isa = PBXGroup;
+			children = (E10000000000000000000006 /* ExpenseTests.swift */,);
+			path = DimeExpensesTests;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -733,6 +809,7 @@
 				533A38F32AA49E5900F66957 /* Alamofire */,
 				D6A4DE1F2D61744400F7F751 /* SwiftUIIntrospect */,
 				D6A4DE232D61744400F7F751 /* SwiftUIIntrospect-Static */,
+				E10000000000000000000002 /* TheirCore */,
 			);
 			productName = dime;
 			productReference = 5327D283287C697400F76ADF /* dime.app */;
@@ -754,6 +831,18 @@
 			productName = ExpenditureWidgetExtension;
 			productReference = 53B1D18A288ED7E400E28062 /* ExpenditureWidgetExtension.appex */;
 			productType = "com.apple.product-type.app-extension";
+		};
+		E10000000000000000000009 /* DimeExpensesTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E1000000000000000000000D;
+			buildPhases = (E1000000000000000000000A, E1000000000000000000000B, E1000000000000000000000C,);
+			buildRules = ();
+			dependencies = (E10000000000000000000011,);
+			name = DimeExpensesTests;
+			packageProductDependencies = (E10000000000000000000012, E10000000000000000000014,);
+			productName = DimeExpensesTests;
+			productReference = E10000000000000000000008;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -796,6 +885,7 @@
 				538D10732A5AB7E7008F1AFB /* XCRemoteSwiftPackageReference "IsScrolling" */,
 				533A38F22AA49E0100F66957 /* XCRemoteSwiftPackageReference "Alamofire" */,
 				D6A4DE1E2D61744400F7F751 /* XCRemoteSwiftPackageReference "SwiftUI-Introspect" */,
+				E10000000000000000000001 /* XCRemoteSwiftPackageReference "TheirCore" */,
 			);
 			productRefGroup = 5327D284287C697400F76ADF /* Products */;
 			projectDirPath = "";
@@ -805,6 +895,7 @@
 				53B1D189288ED7E400E28062 /* ExpenditureWidgetExtension */,
 				5313EC5A28ACE941000EAB0C /* BudgetIntent */,
 				5313EC6528ACE941000EAB0C /* BudgetIntentUI */,
+				E10000000000000000000009 /* DimeExpensesTests */,
 			);
 		};
 /* End PBXProject section */
@@ -846,6 +937,9 @@
 				53B1D193288ED87000E28062 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E1000000000000000000000C /* Resources */ = {
+			isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
 
@@ -991,6 +1085,10 @@
 				53A4147928B6625D008C30E7 /* AppDelegate.swift in Sources */,
 				5327D2DD287C6B5F00F76ADF /* InsightsView.swift in Sources */,
 				53A839BD28D35738006F227C /* SKProduct-LocalizedPrice.swift in Sources */,
+				E10000000000000000000030 /* Expense.swift in Sources */,
+				E10000000000000000000031 /* ExpenseStore.swift in Sources */,
+				E10000000000000000000032 /* CoreDataExpenseRepository.swift in Sources */,
+				E10000000000000000000033 /* ExpenseSubmission.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1024,6 +1122,11 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E1000000000000000000000A /* Sources */ = {
+			isa = PBXSourcesBuildPhase; buildActionMask = 2147483647;
+			files = (E10000000000000000000007 /* ExpenseTests.swift in Sources */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -1041,6 +1144,11 @@
 			isa = PBXTargetDependency;
 			target = 53B1D189288ED7E400E28062 /* ExpenditureWidgetExtension */;
 			targetProxy = 53B1D195288ED87000E28062 /* PBXContainerItemProxy */;
+		};
+		E10000000000000000000011 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5327D282287C697400F76ADF /* dime */;
+			targetProxy = E10000000000000000000010 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -1317,6 +1425,7 @@
 		5327D292287C697C00F76ADF /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DIME_THEIRCORE_EXPENSES";
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = "AppIcon4 AppIcon3 AppIcon2 AppIcon1";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
@@ -1358,6 +1467,7 @@
 		5327D293287C697C00F76ADF /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DIME_THEIRCORE_EXPENSES";
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = "AppIcon4 AppIcon3 AppIcon2 AppIcon1";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
@@ -1458,6 +1568,42 @@
 			};
 			name = Release;
 		};
+		E1000000000000000000000E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = org.stealtho.dime.ExpensesTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/dime.app/dime";
+				TEST_TARGET_NAME = dime;
+			};
+			name = Debug;
+		};
+		E1000000000000000000000F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = org.stealtho.dime.ExpensesTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/dime.app/dime";
+				TEST_TARGET_NAME = dime;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -1503,6 +1649,12 @@
 				53B1D199288ED87000E28062 /* Debug */,
 				53B1D19A288ED87000E28062 /* Release */,
 			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E1000000000000000000000D /* Build configuration list for PBXNativeTarget "DimeExpensesTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (E1000000000000000000000E /* Debug */, E1000000000000000000000F /* Release */,);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
@@ -1565,6 +1717,11 @@
 				minimumVersion = 1.0.0;
 			};
 		};
+		E10000000000000000000001 /* XCRemoteSwiftPackageReference "TheirCore" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Stealth-O/TheirCore.git";
+			requirement = { kind = exactVersion; version = 0.1.1; };
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -1607,6 +1764,21 @@
 			isa = XCSwiftPackageProductDependency;
 			package = D6A4DE1E2D61744400F7F751 /* XCRemoteSwiftPackageReference "SwiftUI-Introspect" */;
 			productName = "SwiftUIIntrospect-Static";
+		};
+		E10000000000000000000002 /* TheirCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E10000000000000000000001 /* XCRemoteSwiftPackageReference "TheirCore" */;
+			productName = TheirCore;
+		};
+		E10000000000000000000012 /* TheirCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E10000000000000000000001 /* XCRemoteSwiftPackageReference "TheirCore" */;
+			productName = TheirCore;
+		};
+		E10000000000000000000014 /* TheirCoreTesting */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E10000000000000000000001 /* XCRemoteSwiftPackageReference "TheirCore" */;
+			productName = TheirCoreTesting;
 		};
 /* End XCSwiftPackageProductDependency section */
 

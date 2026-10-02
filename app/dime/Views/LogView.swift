@@ -13,7 +13,8 @@ import Popovers
 import SwiftUI
 
 struct LogView: View {
-    @ObservedObject var syncMonitor = SyncMonitor.shared
+    private static let localSyncMonitor = SyncMonitor(listen: false)
+    @ObservedObject var syncMonitor = DataController.usesLocalStore ? LogView.localSyncMonitor : SyncMonitor.shared
 
     @State var updatedRecurring = false
 
