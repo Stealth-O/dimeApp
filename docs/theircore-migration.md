@@ -1,4 +1,4 @@
-# Dime → TheirCore: expenses, live budgets and Undo
+# Dime → TheirCore: expenses, live budgets, Undo and recurrence
 
 This fork is a working migration of Dime, with the upstream UI and CoreData model retained. It is not yet a rewrite of every feature.
 
@@ -10,12 +10,15 @@ The transaction editor submits an immutable draft to a fresh `Their.Job`: add, e
 
 List deletion now has an application-owned Undo lifecycle: swipe or confirmation → hide selected rows and update totals → allow Undo for four seconds → commit the entire pending batch in one isolated CoreData save. A VoiceOver Delete action opens the same confirmation without requiring a gesture.
 
-- `Expense.swift`: immutable expense/draft values, commands, typed failures, deletion state and pure budget arithmetic. Budget dates are inclusive; income and future transactions are excluded.
-- `ExpenseStore.swift`: `Their.Desk<ExpenseDeskState, ExpenseEvent>` owns the cached database facts, projected snapshot and named `"deletion"` Job binding. One fixed pure reducer handles every domain event; the binding only maps delay errors into events. `changes` provides latest replay, while an evolved projection suppresses duplicate UI states. Dropping every UI observer does not erase the owner's state or stop its pending commit.
+Main-app recurrence checks now run a fresh, application-owned Job: appearance, foreground or completed sync → catch up persisted series heads → commit all due occurrences atomically → publish current facts. Context-menu, swipe and confirmation stop actions submit the same stop command; they preserve logged history. The retained HomeView alert presents recurrence errors and retries the failed command.
+
+- `Expense.swift`: immutable expense/draft values, commands, typed failures, deletion/recurrence state and pure budget arithmetic. Budget dates are inclusive; income and future transactions are excluded.
+- `ExpenseStore.swift`: `Their.Desk<ExpenseDeskState, ExpenseEvent>` owns the cached database facts, projected snapshot and named deletion, recurrence catch-up and per-reference stop Job bindings. One fixed pure reducer handles every domain event; bindings map operation outcomes into typed events. `changes` provides latest replay, while an evolved projection suppresses duplicate UI states. Dropping every UI observer does not erase the owner's state or stop its pending commit.
+- `ExpenseRecurrence.swift`: one calendar calculation shared by editor catch-up, runtime catch-up and main-app next-date projection. It receives an explicit calendar and date, validates stored intervals, widens weekly arithmetic before multiplying and checks cancellation while collecting due dates.
 - `CoreDataExpenseRepository.swift`: CoreData objects stay inside the adapter. Writes use a separate context, then merge successful commits into the existing UI context. Batch deletion either commits every selected record or none. Failed writes do not leave optimistic changes in the UI or save unrelated tentative edits.
 - `ExpenseSubmission.swift`: a `Their.Desk<Status, Event>` with one fixed pure reducer owns saving/success/failure and the named `"submission"` binding. It blocks duplicate submission and cancels on dismissal. The Combine adapter enters MainActor and reads current state there, so queued older callbacks cannot overwrite a newer submission or cancellation. Cancellation is installed before publishing saving, including reentrant dismissal from a Combine observer.
 - `DataController`: a temporary bridge enters MainActor and publishes the current Desk projection to existing SwiftUI views, with no unsafe actor assumption. It reloads the snapshot after legacy context changes. Its visibility helper masks pending deletion references in retained CoreData lists, log totals and log graphs.
-- `LogView` / `HomeView`: list rows and confirmation delegate deletion to the owner. The toast only presents the owner's Undo state; it no longer saves or rolls back the shared context. Failed deletion restores the rows and presents an error.
+- `LogView` / `HomeView`: list rows and confirmation delegate deletion to the owner. The toast only presents the owner's Undo state; it no longer saves or rolls back the shared context. Failed deletion restores the rows and presents an error. Recurrence stop delegates to the owner; failures preserve the record and can retry from the retained alert.
 - `BudgetView`: primary budget numbers and the main budget graph consume current expense state, including the deletion preview, instead of keeping a total calculated only on appearance.
 
 The existing fetched CoreData objects still render the transaction list. Categories, object identities, relationships and the `.xcdatamodeld` files are unchanged. The new repository supports legacy rows, including rows without a UUID, through stable CoreData object URI references.
@@ -48,7 +51,7 @@ Undo changes only the pending deletion projection. It does not call `viewContext
 | A budget amount must change when an expense changes | Compute totals from the current projected snapshot | CRUD, date/category/income filtering, Undo and SQLite reopen tests |
 | An unsigned fork cannot create the upstream CloudKit monitor | Use an explicit local debug mode, including a non-listening sync monitor | Initial runner crash reproduced; local simulator run succeeds |
 
-IO is outside Desk reducers and Hub evolution. The current small CoreData operations run on MainActor, matching the legacy app's confinement. TheirCore supplies lifecycle and cancellation; it does not move database work onto a background queue. Large imports and recurrence batches need a separate measured migration.
+IO is outside Desk reducers and Hub evolution. The current small CoreData operations run on MainActor, matching the legacy app's confinement. TheirCore supplies lifecycle and cancellation; it does not move database work onto a background queue. Large imports and very large recurrence backlogs still need a measured performance migration; this stage does not move database work onto a background queue.
 
 ## Typed Desk events
 
@@ -60,6 +63,7 @@ The expense reducer handles the following events. Each transition finishes by re
 
 | Domain event | State transition |
 | --- | --- |
+| `mutationCommitted(mutation, refresh)` | Apply known committed rows/deletions and recurrence successors, then apply the read result; keep committed facts if that read fails |
 | `refreshed(.success(expenses))` | Replace cached facts and clear the read failure; preserve the pending batch |
 | `refreshed(.failure(error))` | Keep cached facts and expose the read failure; preserve the pending batch |
 | `deletionRequested(reference)` | Add the reference, clear the deletion failure and hide pending rows |
@@ -80,6 +84,33 @@ The deadline uses an explicit `Their.Job` producer whose Task and reports both r
 
 The 0.3 migration adds explicit domain events and centralizes transitions: `ExpenseStore.swift` is 181 → 198 lines, and `ExpenseSubmission.swift` is 55 → 77. This stage improves visibility of the state rules rather than reducing line count. It adds no scheduler to TheirCore and makes no SwiftUI architecture change.
 
+## Recurrence contract
+
+`ExpenseCommand.catchUpRecurrences` and `stopRecurrence(reference)` use the same effect boundary as editor commands. Automatic calls bind fresh Jobs to the expense Desk: one catch-up binding coalesces overlapping checks, and each stop reference has its own binding so independent stops cannot cancel each other. `ExpenseRecurrenceState` exposes running operations, the last failed operation and its typed failure. Tokens, committed successor links and cached rows stay in `ExpenseDeskState`; only the fixed reducer changes them.
+
+| Request or outcome | Contract |
+| --- | --- |
+| Catch up | Read persisted active heads; skip the pending Undo references and transactions with tentative view-context edits; create every due occurrence and retire old heads in one writer save |
+| Daily / weekly / monthly boundary | The original row is already logged. Advance from its stored day, falling back to its date; include dates through the start of today, including today itself. Weeks use calendar days, rather than fixed seconds |
+| End of month | Preserve Dime's rolling behavior: 31 January 2023 → 28 February → 28 March; leap-year January → 29 February → 29 March. It does not re-anchor every occurrence to the original day |
+| Repeated check or restart | The last generated occurrence carries the interval; the old head is inactive. A check with no due dates performs no save and no widget reload |
+| Invalid persisted interval | Fail atomically with `invalidRecurrence`, rather than loop or overflow; the invalid head can still be stopped |
+| Stop | Set the active head's recurrence type to zero in the isolated writer; retain record identity, fields, `onceRecurring` and all logged history. Repeating a completed stop is a no-op |
+| Stop with an already advanced local reference | Resolve its committed successors, including multiple advances during this owner's lifetime, then stop the current head |
+| Cancel owned Jobs | Unbind current work and clear queued start tokens. Before IO, check both Task cancellation and the reduced operation token; a completed database commit remains visible |
+| Lookup or save fails | Publish the typed operation failure, preserve existing rows and save nothing. Retry uses the exact failed catch-up or stop command |
+| Another operation starts after failure | Preserve an independent operation's failure and retry reference; starting its own retry clears that failure |
+| Refresh fails after commit | Apply immutable committed row facts and successor links first; keep them and expose the read failure, instead of reverting to stale rows |
+| UI observers detach / owner releases | The retained owner continues without UI observers; a late observer receives current state. Releasing the owner cancels outstanding work and does not retain it through a preparation wait |
+
+A `recurrenceStarted(operation, token)` event may be queued when requested from a synchronous observer. The IO adapter claims that token on its MainActor turn, rather than reading `current` immediately after `send` as an acknowledgement. `recurrenceEnded` retires only its matching token; `recurrencesCancelled` also clears starts queued behind an observer. `mutationCommitted` always publishes database facts, including when cancellation happened during the commit. This distinction keeps Desk's state fencing separate from the check before irreversible IO.
+
+The calendar and date are injected into the repository and captured once per catch-up batch. The existing foreground, appearance and sync triggers remain application policy; there is no new scheduler or persistent timer in TheirCore. The synchronous CoreData save callback is recorded under `Their.Lock` and merged on the feature actor, replacing the adapter's previous `MainActor.assumeIsolated`. Test-only preparation and completion seams are behind `#if DEBUG` and absent from Release.
+
+This feature uses the published TheirCore 0.3.0 API without changing the library. The expense owner grows from 198 to 355 lines as it adds explicit recurrence lifecycle and successor routing. Declaration sorting in retained DataController/views preserves existing initializer signatures. A SwiftSyntax token comparison confirms that unrelated method/property bodies and all 29 existing test scenarios retain their code; the functional changes in those retained adapters are the recurrence calls and error/retry presentation.
+
+Successor links are transient routing for commands already queued in this process. This stage adds no persistent series identity and does not verify simultaneous CloudKit recurrence processing on different devices. There is no CoreData schema migration.
+
 ## Run and verify
 
 Open `app/dime.xcodeproj`, select the shared `dime` scheme and an iOS simulator. The debug scheme enables `DIME_LOCAL_STORE=1`: a separate `DimeLocal.sqlite` store, with CloudKit disabled. The normal release path retains the upstream CloudKit configuration; this stage does not verify iCloud sync.
@@ -96,7 +127,7 @@ xcodebuild -project app/dime.xcodeproj -scheme dime -configuration Release \
 
 `DimeExpensesTests` covers SQLite CRUD/reopen, legacy rows, real save failure, budget filtering, recurrence catch-up from the editor, shared/reconnected observation, cancellation, retry and duplicate submission. The fixtures reuse the app's exact managed object model.
 
-Verified on 2026-10-03 with Xcode 26.6 and the iPhone 17 / iOS 26.5 simulator, using the exact published TheirCore 0.3.0 pin: **29 tests passed**, including the **12 deletion/Undo tests** and **six Desk integration scenarios**, and the migrated Release build succeeded. The two 0.3 scenarios run 50 iterations each under `Their.stress`: a failed refresh retains cached expenses before recovery replaces them, with unchanged projections suppressed; an editor follows the exact idle/saving/failure/saving/saved/idle sequence through failure, retry and cancellation after commit. All 27 pre-existing test scenarios retain their behavior; declaration order and switch patterns follow the repository rules. The changed production files introduce no compiler warnings. The seven other package pins remain byte-for-byte identical. The new tests run under `Their.stress` with explicit deadline gates and event/count recorders, without sleeps or polling: 50 iterations per owner-only scenario and 10 per CoreData integration scenario. They cover batch expiry, timer replacement, cancellation races, concurrent edits, unrelated unsaved changes, failure/retry, zero observers, owner release, process restart and refresh failure after commit. Four additional owner-only Desk stress scenarios cover timer failure with an intervening save, reentrant Undo before a deadline starts, editor replacement during a committed save, and dismissal by a synchronous saving observer followed by a fresh retry.
+Verified on 2026-10-03 with Xcode 26.6 and the iPhone 17 / iOS 26.5 simulator, using the exact published TheirCore 0.3.0 pin: **56 tests passed**, including the **12 deletion/Undo tests** and **six Desk integration scenarios**, and the migrated Release build succeeded. The two 0.3 scenarios run 50 iterations each under `Their.stress`: a failed refresh retains cached expenses before recovery replaces them, with unchanged projections suppressed; an editor follows the exact idle/saving/failure/saving/saved/idle sequence through failure, retry and cancellation after commit. All 29 expense/Undo/Desk scenarios from the previous stage retain their behavior; declaration order and switch patterns follow the repository rules. The changed production files and the new recurrence tests introduce no compiler warnings; pre-existing build-script and upstream diagnostics remain. The seven other package pins remain byte-for-byte identical. The new tests run under `Their.stress` with explicit deadline gates and event/count recorders, without sleeps or polling: 50 iterations per owner-only scenario and 10 per CoreData integration scenario. They cover batch expiry, timer replacement, cancellation races, concurrent edits, unrelated unsaved changes, failure/retry, zero observers, owner release, process restart and refresh failure after commit. Four additional owner-only Desk stress scenarios cover timer failure with an intervening save, reentrant Undo before a deadline starts, editor replacement during a committed save, and dismissal by a synchronous saving observer followed by a fresh retry.
 
 The earlier local-store UI smoke test created a Food expense named "TheirCore smoke" for €12 and an overall weekly budget of €100. Cancelling an edit kept the original record. Saving an edit to €25 changed the budget from €88 / 12% spent to €75 / 25% spent, including its graph. Relaunching preserved both values. Deleting through the editor emptied the log and restored €100 / 0% spent; another relaunch preserved the deletion and restored budget.
 
@@ -104,14 +135,16 @@ The 2026-10-03 UI smoke test used a disposable Food expense named "Undo route sm
 
 The earlier Desk verification repeated this route in the final 0.2.0 build with a disposable Food expense named "Desk Undo smoke" for €13. Saving and relaunching preserved the record and €87 / 13% spent. The accessible Delete confirmation hid the row and exposed Undo; tapping Undo restored the record and budget. A second deletion showed €100 / 0% while Undo remained visible. After expiry the toast disappeared; relaunching preserved an empty log and €100 / 0%. The swipe gesture itself remains outside the native automation check described above.
 
-The 0.3.0 verification uses integration tests and the Release simulator build; the manual interface checks above were performed on the previous releases.
+The recurrence stage adds **27 tests**, all under `Their.stress`: 50 iterations for the calendar and owner-only cases, 10 for CoreData integration cases. They cover daily/weekly/monthly intervals, coefficients, month ends and both DST transitions; atomic multi-series field/budget preservation; SQLite reopen and real read-only failures; invalid legacy intervals; no observers and owner release; pre-IO, reentrant and during-commit cancellation; queued starts; independent stop bindings and failures; old-head successor routing; failed refreshes; and coexistence with Undo and tentative edits. The final full test run uses a separate DerivedData directory and a newly created iPhone 17 / iOS 26.5 simulator: 56 tests pass. A prior rerun in the reused build/test environment inconsistently reported the old fixture assertion; its cause has not been established. The final verification uses the fresh run, with no business-layer changes to obtain it. The Release simulator build also passes in the separate DerivedData directory, and all 56 tests pass again with `test-without-building` on the same isolated simulator after that build. The temporary verification simulator was removed after these checks. The seven other pins, TheirCore 0.3.0 pin and CoreData model remain unchanged.
+
+The 0.3.0 and recurrence verification uses integration tests and the Release simulator build; the manual interface checks above were performed on the previous releases.
 
 For a CLI debug launch, pass `SIMCTL_CHILD_DIME_LOCAL_STORE=1` to `xcrun simctl launch`. A signed build using CloudKit needs the fork owner's signing, app-group and CloudKit configuration rather than the upstream developer's identifiers.
 
 ## Remaining migration boundaries
 
-1. Recurrence scheduling and stopping recurrence, category management, budget creation, detailed historical budget screens, insights, templates and import still use legacy routines. Editor recurrence catch-up is preserved inside its isolated commit; the legacy recurrence runtime has not yet been replaced. Screens outside the migrated log and primary budget projections may keep showing persisted rows during the transient Undo window.
-2. App Intents and widget/intent extensions retain the original DataController path. The main app enables the migrated slice with `DIME_THEIRCORE_EXPENSES`; extension targets do not yet consume it. They observe persisted data after deletion commits, rather than the main app's transient preview.
+1. Category management, budget creation, detailed historical budget screens, insights, templates and import still use legacy routines. Main-app recurrence catch-up and stop now delegate to the expense owner; legacy creators still write through DataController before requesting the shared catch-up route. Screens outside the migrated log and primary budget projections may keep showing persisted rows during the transient Undo window.
+2. App Intents retain legacy creation, and standalone widget/intent extension targets retain the original DataController recurrence path behind the compilation flag. The main app enables the migrated slice with `DIME_THEIRCORE_EXPENSES`; extension targets do not yet consume it. They observe persisted data after deletion commits, rather than the main app's transient preview.
 3. CloudKit sync, push notifications, physical-device signing and widgets were not exercised as part of the local expense routes.
 
 Continue with complete user scenarios. Promote a shared recipe or a new TheirCore primitive only after another implemented feature demonstrates the same need.

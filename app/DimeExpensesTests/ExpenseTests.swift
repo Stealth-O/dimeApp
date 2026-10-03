@@ -656,6 +656,26 @@ final class ExpenseTests: XCTestCase {
     }
 
     @MainActor
+    func testSavingAnExpenseDoesNotCommitALegacyUndoableDeletion() async throws {
+        let fixture = try Fixture()
+        defer { try? fixture.close() }
+        let draft = sampleDraft()
+        guard case .saved(let expense) = try await mutation(fixture.store, .save(draft, editing: nil)) else {
+            return XCTFail("Expected saved expense")
+        }
+        let context = fixture.container.viewContext
+        let id = context.persistentStoreCoordinator!.managedObjectID(forURIRepresentation: expense.reference)!
+        context.delete(try context.existingObject(with: id))
+        fixture.store.reload()
+        XCTAssertTrue(fixture.store.state.expenses.isEmpty)
+        _ = try await mutation(fixture.store, .save(draft, editing: nil))
+        XCTAssertEqual(fixture.store.state.expenses.count, 1)
+        context.rollback()
+        fixture.store.reload()
+        XCTAssertEqual(fixture.store.state.expenses.count, 2, "Undo must restore the original without losing the committed expense")
+    }
+
+    @MainActor
     func testSQLiteAddEditDeleteAndRestartUpdateListAndBudgets() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -697,26 +717,6 @@ final class ExpenseTests: XCTestCase {
         fixture = try Fixture(url: url)
         XCTAssertTrue(fixture.store.state.expenses.isEmpty, "Deletion must survive reopening SQLite")
         try fixture.close()
-    }
-
-    @MainActor
-    func testSavingAnExpenseDoesNotCommitALegacyUndoableDeletion() async throws {
-        let fixture = try Fixture()
-        defer { try? fixture.close() }
-        let draft = sampleDraft()
-        guard case .saved(let expense) = try await mutation(fixture.store, .save(draft, editing: nil)) else {
-            return XCTFail("Expected saved expense")
-        }
-        let context = fixture.container.viewContext
-        let id = context.persistentStoreCoordinator!.managedObjectID(forURIRepresentation: expense.reference)!
-        context.delete(try context.existingObject(with: id))
-        fixture.store.reload()
-        XCTAssertTrue(fixture.store.state.expenses.isEmpty)
-        _ = try await mutation(fixture.store, .save(draft, editing: nil))
-        XCTAssertEqual(fixture.store.state.expenses.count, 1)
-        context.rollback()
-        fixture.store.reload()
-        XCTAssertEqual(fixture.store.state.expenses.count, 2, "Undo must restore the original without losing the committed expense")
     }
 
     @MainActor
@@ -821,6 +821,10 @@ private final class FakeRepository: ExpenseRepository {
     var records: [Expense] = []
     var saveCount = 0
 
+    func catchUpRecurrences(excluding references: Set<URL>) throws -> ExpenseRecurrenceCommit {
+        ExpenseRecurrenceCommit()
+    }
+
     func delete(_ references: [URL]) throws {
         if failDelete { throw ExpenseFailure.persistence("Disk unavailable") }
         deletedBatches.append(references)
@@ -845,6 +849,12 @@ private final class FakeRepository: ExpenseRepository {
         didSave()
         return record
     }
+
+    func stopRecurrence(_ reference: URL) throws -> Expense {
+        guard let record = records.first(where: { $0.reference == reference }) else { throw ExpenseFailure.notFound }
+        return record
+    }
+
 }
 
 /// Deterministic deadlines: tests release a specific request instead of sleeping or polling.
@@ -852,11 +862,6 @@ private final class FakeRepository: ExpenseRepository {
 private final class ManualDeletionDelay {
     let completions = Their.TestCountRecorder()
     let requests = Their.TestEventRecorder<Request>()
-
-    struct Request: Sendable {
-        let gate: Their.TestSignal
-        let nanoseconds: UInt64
-    }
 
     func expire(_ index: Int) {
         requests.events[index].gate.signal()
@@ -867,5 +872,10 @@ private final class ManualDeletionDelay {
         requests.append(request)
         defer { _ = completions.increment() }
         try await request.gate.wait()
+    }
+
+    struct Request: Sendable {
+        let gate: Their.TestSignal
+        let nanoseconds: UInt64
     }
 }

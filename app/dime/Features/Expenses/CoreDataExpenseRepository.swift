@@ -1,73 +1,70 @@
 import CoreData
 import Foundation
+import TheirCore
 
 @MainActor
 final class CoreDataExpenseRepository: ExpenseRepository {
+    private let calendar: @Sendable () -> Calendar
+    private let didCommit: () -> Void
+    private let now: @Sendable () -> Date
     private let viewContext: NSManagedObjectContext
     private let writer: NSManagedObjectContext
-    private let didCommit: () -> Void
 
-    init(context: NSManagedObjectContext, didCommit: @escaping () -> Void = {}) {
+    init(context: NSManagedObjectContext, calendar: @escaping @Sendable () -> Calendar = { .current },
+         now: @escaping @Sendable () -> Date = { .now }, didCommit: @escaping () -> Void = {}) {
         precondition(context.concurrencyType == .mainQueueConcurrencyType)
+        self.calendar = calendar
+        self.didCommit = didCommit
+        self.now = now
         viewContext = context
         writer = NSManagedObjectContext(concurrencyType: .mainQueueConcurrencyType)
         writer.persistentStoreCoordinator = context.persistentStoreCoordinator
-        self.didCommit = didCommit
     }
 
-    func load() throws -> [Expense] {
-        let request = Transaction.fetchRequest()
-        request.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
-        // Retain unrelated tentative legacy edits; deletion previews belong to ExpenseStore.
-        return try viewContext.fetch(request).map(Self.snapshot).sorted { lhs, rhs in
-            if lhs.date != rhs.date { return (lhs.date ?? .distantPast) > (rhs.date ?? .distantPast) }
-            return lhs.reference.absoluteString < rhs.reference.absoluteString
-        }
-    }
-
-    func save(_ draft: ExpenseDraft, editing reference: URL?) throws -> Expense {
-        guard draft.amount.isFinite, draft.amount != 0 else { throw ExpenseFailure.invalidAmount }
-        guard (0...3).contains(draft.recurringType), draft.recurringType == 0 ||
-                (1...Int(Int16.max) / 7).contains(draft.recurringCoefficient) else {
-            throw ExpenseFailure.invalidRecurrence
-        }
+    /// Advance persisted heads once, atomically, leaving pending deletion/edit rows alone.
+    func catchUpRecurrences(excluding references: Set<URL>) throws -> ExpenseRecurrenceCommit {
         writer.reset()
         defer { writer.reset() }
-
-        let category: Category?
-        if let reference = draft.category {
-            category = try existing(reference, as: Category.self)
-        } else {
-            category = nil
+        let request = Transaction.fetchRequest()
+        request.predicate = NSPredicate(format: "recurringType > 0")
+        let transactions = try writer.fetch(request).sorted {
+            $0.objectID.uriRepresentation().absoluteString < $1.objectID.uriRepresentation().absoluteString
         }
-        let transaction: Transaction
-        if let reference {
-            transaction = try existing(reference, as: Transaction.self)
-        } else {
-            transaction = Transaction(context: writer)
-            transaction.id = UUID()
+        let tentative = viewContext.updatedObjects.union(viewContext.deletedObjects)
+            .compactMap { ($0 as? Transaction)?.objectID.uriRepresentation() }
+        let excluded = references.union(tentative)
+        let currentCalendar = calendar()
+        let currentDate = now()
+        var changed: [Transaction] = []
+        var successors: [(Transaction, Transaction)] = []
+        for transaction in transactions where !excluded.contains(transaction.objectID.uriRepresentation()) {
+            try Task.checkCancellation()
+            if let head = try expandRecurrence(transaction, through: currentDate, calendar: currentCalendar, changed: &changed) {
+                successors.append((transaction, head))
+            }
         }
-        transaction.note = draft.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? category?.wrappedName ?? "" : draft.note.trimmingCharacters(in: .whitespaces)
-        transaction.income = draft.income
-        if let category { transaction.category = category }
-        transaction.amount = draft.amount
-        transaction.date = draft.date
-        let calendar = Calendar(identifier: .gregorian)
-        transaction.day = calendar.date(bySettingHour: 0, minute: 0, second: 0, of: draft.date) ?? draft.date
-        transaction.month = calendar.date(from: calendar.dateComponents([.month, .year], from: draft.date)) ?? draft.date
-        if draft.recurringType > 0 {
-            transaction.onceRecurring = true
-            transaction.recurringType = Int16(draft.recurringType)
-            transaction.recurringCoefficient = Int16(draft.recurringCoefficient)
-            expandRecurrence(transaction)
-        } else if reference != nil {
-            transaction.onceRecurring = false
-            transaction.recurringType = 0
-            transaction.recurringCoefficient = Int16(clamping: draft.recurringCoefficient)
-        }
+        guard writer.hasChanges else { return ExpenseRecurrenceCommit() }
         try commit()
-        return Self.snapshot(transaction)
+        return ExpenseRecurrenceCommit(expenses: changed.map(Self.snapshot), successors: Dictionary(uniqueKeysWithValues:
+            successors.map { ($0.0.objectID.uriRepresentation(), $0.1.objectID.uriRepresentation()) }))
+    }
+
+    private func commit() throws {
+        // The Apple callback records synchronously under the library lock. No actor assertion
+        // or asynchronous merge is needed, so unrelated unsaved view-context edits survive.
+        let captured = SaveNotification()
+        let observer = NotificationCenter.default.addObserver(forName: .NSManagedObjectContextDidSave,
+                                                              object: writer, queue: nil) { notification in
+            captured.record(notification)
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        try Task.checkCancellation()
+        try writer.save()
+        if let notification = captured.read() {
+            viewContext.mergeChanges(fromContextDidSave: notification)
+            viewContext.processPendingChanges()
+        }
+        didCommit()
     }
 
     func delete(_ references: [URL]) throws {
@@ -92,24 +89,95 @@ final class CoreDataExpenseRepository: ExpenseRepository {
         return object
     }
 
-    @MainActor
-    private final class SaveNotification {
-        var value: Notification?
+    @discardableResult
+    private func expandRecurrence(_ transaction: Transaction, through date: Date, calendar: Calendar,
+                                  changed: inout [Transaction]) throws -> Transaction? {
+        let dates = try ExpenseRecurrence.dates(after: transaction.day ?? transaction.date ?? date,
+            type: Int(transaction.recurringType), coefficient: Int(transaction.recurringCoefficient),
+            through: date, calendar: calendar)
+        guard !dates.isEmpty else { return nil }
+        let type = transaction.recurringType
+        let coefficient = transaction.recurringCoefficient
+        var head: Transaction?
+        for date in dates {
+            try Task.checkCancellation()
+            let next = Transaction(context: writer)
+            next.note = transaction.wrappedNote
+            next.category = transaction.category
+            next.amount = transaction.amount
+            next.income = transaction.income
+            next.date = date
+            next.day = date
+            next.id = UUID()
+            var monthCalendar = Calendar(identifier: .gregorian)
+            monthCalendar.timeZone = calendar.timeZone
+            next.month = monthCalendar.date(from: monthCalendar.dateComponents([.month, .year], from: date)) ?? date
+            next.onceRecurring = true
+            changed.append(next)
+            head = next
+        }
+        head?.recurringType = type
+        head?.recurringCoefficient = coefficient
+        transaction.recurringType = 0
+        changed.append(transaction)
+        return head
     }
 
-    private func commit() throws {
-        let captured = SaveNotification()
-        let observer = NotificationCenter.default.addObserver(forName: .NSManagedObjectContextDidSave,
-                                                              object: writer, queue: nil) { notification in
-            MainActor.assumeIsolated { captured.value = notification }
+    func load() throws -> [Expense] {
+        let request = Transaction.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
+        // Retain unrelated tentative legacy edits; deletion previews belong to ExpenseStore.
+        return try viewContext.fetch(request).map(Self.snapshot).sorted { lhs, rhs in
+            if lhs.date != rhs.date { return (lhs.date ?? .distantPast) > (rhs.date ?? .distantPast) }
+            return lhs.reference.absoluteString < rhs.reference.absoluteString
         }
-        defer { NotificationCenter.default.removeObserver(observer) }
-        try writer.save()
-        if let notification = captured.value {
-            viewContext.mergeChanges(fromContextDidSave: notification)
-            viewContext.processPendingChanges()
+    }
+
+    func save(_ draft: ExpenseDraft, editing reference: URL?) throws -> Expense {
+        guard draft.amount.isFinite, draft.amount != 0 else { throw ExpenseFailure.invalidAmount }
+        guard (0...3).contains(draft.recurringType), draft.recurringType == 0 ||
+                (1...Int(Int16.max)).contains(draft.recurringCoefficient) else {
+            throw ExpenseFailure.invalidRecurrence
         }
-        didCommit()
+        writer.reset()
+        defer { writer.reset() }
+        let category: Category?
+        if let reference = draft.category {
+            category = try existing(reference, as: Category.self)
+        } else {
+            category = nil
+        }
+        let transaction: Transaction
+        if let reference {
+            transaction = try existing(reference, as: Transaction.self)
+        } else {
+            transaction = Transaction(context: writer)
+            transaction.id = UUID()
+        }
+        transaction.note = draft.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? category?.wrappedName ?? "" : draft.note.trimmingCharacters(in: .whitespaces)
+        transaction.income = draft.income
+        if let category { transaction.category = category }
+        transaction.amount = draft.amount
+        transaction.date = draft.date
+        var monthCalendar = Calendar(identifier: .gregorian)
+        let currentCalendar = calendar()
+        monthCalendar.timeZone = currentCalendar.timeZone
+        transaction.day = currentCalendar.startOfDay(for: draft.date)
+        transaction.month = monthCalendar.date(from: monthCalendar.dateComponents([.month, .year], from: draft.date)) ?? draft.date
+        if draft.recurringType > 0 {
+            transaction.onceRecurring = true
+            transaction.recurringType = Int16(draft.recurringType)
+            transaction.recurringCoefficient = Int16(draft.recurringCoefficient)
+            var changed: [Transaction] = []
+            try expandRecurrence(transaction, through: now(), calendar: currentCalendar, changed: &changed)
+        } else if reference != nil {
+            transaction.onceRecurring = false
+            transaction.recurringType = 0
+            transaction.recurringCoefficient = Int16(clamping: draft.recurringCoefficient)
+        }
+        try commit()
+        return Self.snapshot(transaction)
     }
 
     static func snapshot(_ transaction: Transaction) -> Expense {
@@ -119,32 +187,27 @@ final class CoreDataExpenseRepository: ExpenseRepository {
                 recurringType: Int(transaction.recurringType), recurringCoefficient: Int(transaction.recurringCoefficient))
     }
 
-    /// Preserve the editor's existing catch-up behavior, but commit all occurrences atomically.
-    private func expandRecurrence(_ transaction: Transaction) {
-        let today = Calendar.current.startOfDay(for: Date.now)
-        guard transaction.nextTransactionDate <= today else { return }
-        var date = transaction.nextTransactionDate
-        while date <= today {
-            let next = Transaction(context: writer)
-            next.note = transaction.wrappedNote
-            next.category = transaction.category
-            next.amount = transaction.amount
-            next.income = transaction.income
-            next.date = date
-            next.day = date
-            next.id = UUID()
-            let calendar = Calendar(identifier: .gregorian)
-            next.month = calendar.date(from: calendar.dateComponents([.month, .year], from: date))!
-            next.onceRecurring = true
-            let component: Calendar.Component = transaction.recurringType == 3 ? .month : .day
-            let coefficient = Int(transaction.recurringCoefficient) * (transaction.recurringType == 2 ? 7 : 1)
-            let following = Calendar.current.date(byAdding: component, value: coefficient, to: date)!
-            if following > today {
-                next.recurringType = transaction.recurringType
-                next.recurringCoefficient = transaction.recurringCoefficient
-            }
-            date = following
+    func stopRecurrence(_ reference: URL) throws -> Expense {
+        writer.reset()
+        defer { writer.reset() }
+        let transaction = try existing(reference, as: Transaction.self)
+        if transaction.recurringType != 0 {
+            transaction.recurringType = 0
+            try commit()
         }
-        transaction.recurringType = 0
+        return Self.snapshot(transaction)
+    }
+}
+
+/// Thin, synchronous Apple notification boundary; every access uses Their.Lock.
+private final class SaveNotification: Sendable {
+    private let value = Their.Lock<Notification?>(nil)
+
+    func read() -> Notification? {
+        value.withLock { $0 }
+    }
+
+    func record(_ notification: Notification) {
+        value.withLock { $0 = notification }
     }
 }

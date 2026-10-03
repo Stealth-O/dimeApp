@@ -19,44 +19,14 @@ enum DeletionType {
 }
 
 class OverallTransactionManager: ObservableObject {
-    @Published var toEdit: Transaction?
-    @Published var toDelete: Transaction?
-    @Published var showPopup: Bool = false
     @Published var future: Bool = false
+    @Published var showPopup: Bool = false
+    @Published var toDelete: Transaction?
+    @Published var toEdit: Transaction?
 }
 
 struct HomeView: View {
     @EnvironmentObject var appLockVM: AppLockViewModel
-
-    @StateObject var toastPresenter = OverallToastPresenter()
-    @StateObject var transactionManager = OverallTransactionManager()
-    @EnvironmentObject var dataController: DataController
-
-    @State var currentTab = "Log"
-
-    var topEdge: CGFloat
-    var bottomEdge: CGFloat
-
-    @State var fromURL1: Bool = false
-    @State var fromURL2: Bool = false
-    @State var fromURL3: Bool = false
-    @State var fromURL4: Bool = false
-
-    @State var launchAdd: Bool = false
-    @State var launchSearch: Bool = false
-
-    @State var counter = 0
-
-    @EnvironmentObject var tabBarManager: TabBarManager
-
-    @State var showPopup = false
-
-    // Hiding Native TabBar...
-    init(topEdge: CGFloat, bottomEdge: CGFloat) {
-        UITabBar.appearance().isHidden = true
-        self.topEdge = topEdge
-        self.bottomEdge = bottomEdge
-    }
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -135,6 +105,15 @@ struct HomeView: View {
         } message: {
             Text("Your transactions were restored. Please try again.")
         }
+        .alert("Couldn't update recurring transactions", isPresented: Binding(
+            get: { dataController.expenseState.recurrence.failure != nil },
+            set: { _ in }
+        )) {
+            Button("Try Again") { dataController.expenses.retryRecurrence() }
+            Button("Cancel", role: .cancel) { dataController.expenses.clearRecurrenceFailure() }
+        } message: {
+            Text(dataController.expenseState.recurrence.failure?.errorDescription ?? "Please try again.")
+        }
         .onChange(of: transactionManager.showPopup) { newValue in
             withAnimation {
                 showPopup = newValue
@@ -182,6 +161,36 @@ struct HomeView: View {
                 currentTab = "Budget"
             }
         }
+    }
+    var bottomEdge: CGFloat
+
+    @State var counter = 0
+
+    @State var currentTab = "Log"
+    @EnvironmentObject var dataController: DataController
+
+    @State var fromURL1: Bool = false
+    @State var fromURL2: Bool = false
+    @State var fromURL3: Bool = false
+    @State var fromURL4: Bool = false
+
+    @State var launchAdd: Bool = false
+    @State var launchSearch: Bool = false
+
+    @State var showPopup = false
+
+    @EnvironmentObject var tabBarManager: TabBarManager
+
+    @StateObject var toastPresenter = OverallToastPresenter()
+
+    var topEdge: CGFloat
+    @StateObject var transactionManager = OverallTransactionManager()
+
+    // Hiding Native TabBar...
+    init(topEdge: CGFloat, bottomEdge: CGFloat) {
+        UITabBar.appearance().isHidden = true
+        self.topEdge = topEdge
+        self.bottomEdge = bottomEdge
     }
 }
 

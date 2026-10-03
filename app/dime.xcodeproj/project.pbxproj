@@ -182,6 +182,12 @@
 		E10000000000000000000007 /* ExpenseTests.swift in Sources */ = {
 			isa = PBXBuildFile; fileRef = E10000000000000000000006 /* ExpenseTests.swift */;
 		};
+		E10000000000000000000034 /* ExpenseRecurrence.swift in Sources */ = {
+			isa = PBXBuildFile; fileRef = E10000000000000000000024 /* ExpenseRecurrence.swift */;
+		};
+		E10000000000000000000039 /* RecurrenceTests.swift in Sources */ = {
+			isa = PBXBuildFile; fileRef = E10000000000000000000029 /* RecurrenceTests.swift */;
+		};
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -381,6 +387,12 @@
 		};
 		E10000000000000000000008 /* DimeExpensesTests.xctest */ = {
 			isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DimeExpensesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR;
+		};
+		E10000000000000000000024 /* ExpenseRecurrence.swift */ = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExpenseRecurrence.swift; sourceTree = "<group>";
+		};
+		E10000000000000000000029 /* RecurrenceTests.swift */ = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecurrenceTests.swift; sourceTree = "<group>";
 		};
 /* End PBXFileReference section */
 
@@ -733,6 +745,7 @@
 				E10000000000000000000021 /* ExpenseStore.swift */,
 				E10000000000000000000022 /* CoreDataExpenseRepository.swift */,
 				E10000000000000000000023 /* ExpenseSubmission.swift */,
+				E10000000000000000000024 /* ExpenseRecurrence.swift */,
 			);
 			name = Expenses;
 			path = dime/Features/Expenses;
@@ -740,7 +753,7 @@
 		};
 		E10000000000000000000005 /* DimeExpensesTests */ = {
 			isa = PBXGroup;
-			children = (E10000000000000000000006 /* ExpenseTests.swift */,);
+			children = (E10000000000000000000006 /* ExpenseTests.swift */, E10000000000000000000029 /* RecurrenceTests.swift */,);
 			path = DimeExpensesTests;
 			sourceTree = "<group>";
 		};
@@ -1089,6 +1102,7 @@
 				E10000000000000000000031 /* ExpenseStore.swift in Sources */,
 				E10000000000000000000032 /* CoreDataExpenseRepository.swift in Sources */,
 				E10000000000000000000033 /* ExpenseSubmission.swift in Sources */,
+				E10000000000000000000034 /* ExpenseRecurrence.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1124,7 +1138,7 @@
 		};
 		E1000000000000000000000A /* Sources */ = {
 			isa = PBXSourcesBuildPhase; buildActionMask = 2147483647;
-			files = (E10000000000000000000007 /* ExpenseTests.swift in Sources */,);
+			files = (E10000000000000000000007 /* ExpenseTests.swift in Sources */, E10000000000000000000039 /* RecurrenceTests.swift in Sources */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */

@@ -8,22 +8,22 @@
 import CoreData
 import Foundation
 import SwiftUI
-import WidgetKit
 #if DIME_THEIRCORE_EXPENSES
 import TheirCore
 #endif
+import WidgetKit
 
 @available(iOS 16, *)
 enum CustomError: Swift.Error, CustomLocalizedStringResourceConvertible {
-    case notFound,
-         coreDataSave,
-         unknownId(id: String),
-         unknownError(message: String)
+    case coreDataSave
+    case notFound
+    case unknownError(message: String)
+    case unknownId(id: String)
 
     var localizedStringResource: LocalizedStringResource {
         switch self {
-        case let .unknownError(message): return "An unknown error occurred: \(message)"
-        case let .unknownId(id): return "No category with an ID matching: \(id)"
+        case .unknownError(let message): return "An unknown error occurred: \(message)"
+        case .unknownId(let id): return "No category with an ID matching: \(id)"
         case .notFound: return "Category not found"
         case .coreDataSave: return "Couldn't save to CoreData"
         }
@@ -31,28 +31,28 @@ enum CustomError: Swift.Error, CustomLocalizedStringResourceConvertible {
 }
 
 class DataController: ObservableObject {
-    static let shared = DataController()
 
-    static var usesLocalStore: Bool {
-#if DEBUG
-        return ProcessInfo.processInfo.environment["DIME_LOCAL_STORE"] == "1"
-#else
-        return false
-#endif
+    var addedTransaction: Bool {
+        get {
+            UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.bool(forKey: "newTransactionAdded")
+        }
+
+        set {
+            UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.set(newValue, forKey: "newTransactionAdded")
+        }
     }
 
     var container = NSPersistentCloudKitContainer(name: "MainModel")
 
 #if DIME_THEIRCORE_EXPENSES
-    @Published private(set) var expenseState = ExpenseState()
-    private var expenseObservation: Their.HubCancel?
     private var expenseChanges: NSObjectProtocol?
+    private var expenseObservation: Their.HubCancel?
 
     @MainActor
     lazy var expenses: ExpenseStore = {
-        let repository = CoreDataExpenseRepository(context: container.viewContext) {
+        let repository = CoreDataExpenseRepository(context: container.viewContext, didCommit: {
             WidgetCenter.shared.reloadAllTimelines()
-        }
+        })
         let store = ExpenseStore(repository: repository)
         expenseState = store.state
         expenseObservation = store.observe { [weak self, weak store] _ in
@@ -64,19 +64,29 @@ class DataController: ObservableObject {
         }
         return store
     }()
+    @Published private(set) var expenseState = ExpenseState()
 
-    deinit {
-        expenseObservation?()
-        if let expenseChanges { NotificationCenter.default.removeObserver(expenseChanges) }
-    }
+
 #endif
+    static let shared = DataController()
 
-    /// Bridge retained CoreData rendering to the app owner's pending-deletion projection.
-    func visibleTransactions<S: Sequence>(_ transactions: S) -> [Transaction] where S.Element == Transaction {
-#if DIME_THEIRCORE_EXPENSES
-        return transactions.filter { !expenseState.deletion.references.contains($0.objectID.uriRepresentation()) }
+    // internal variables
+
+    var tipCounter: Int {
+        get {
+            UserDefaults.standard.integer(forKey: "tipCounter")
+        }
+
+        set {
+            UserDefaults.standard.set(newValue, forKey: "tipCounter")
+        }
+    }
+
+    static var usesLocalStore: Bool {
+#if DEBUG
+        return ProcessInfo.processInfo.environment["DIME_LOCAL_STORE"] == "1"
 #else
-        return Array(transactions)
+        return false
 #endif
     }
 
@@ -153,429 +163,12 @@ class DataController: ObservableObject {
 ////        }
     }
 
-    // internal variables
-
-    var tipCounter: Int {
-        get {
-            UserDefaults.standard.integer(forKey: "tipCounter")
-        }
-
-        set {
-            UserDefaults.standard.set(newValue, forKey: "tipCounter")
-        }
+#if DIME_THEIRCORE_EXPENSES
+    deinit {
+        expenseObservation?()
+        if let expenseChanges { NotificationCenter.default.removeObserver(expenseChanges) }
     }
-
-    var addedTransaction: Bool {
-        get {
-            UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.bool(forKey: "newTransactionAdded")
-        }
-
-        set {
-            UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.set(newValue, forKey: "newTransactionAdded")
-        }
-    }
-
-    // adding or deleting
-
-    func deleteAll() {
-        let fetchRequest1: NSFetchRequest<NSFetchRequestResult> = Transaction.fetchRequest()
-        let batchDeleteRequest1 = NSBatchDeleteRequest(fetchRequest: fetchRequest1)
-        _ = try? container.viewContext.executeAndMergeChanges(using: batchDeleteRequest1)
-
-        let fetchRequest2: NSFetchRequest<NSFetchRequestResult> = Category.fetchRequest()
-        let batchDeleteRequest2 = NSBatchDeleteRequest(fetchRequest: fetchRequest2)
-        _ = try? container.viewContext.executeAndMergeChanges(using: batchDeleteRequest2)
-
-        let fetchRequest3: NSFetchRequest<NSFetchRequestResult> = Budget.fetchRequest()
-        let batchDeleteRequest3 = NSBatchDeleteRequest(fetchRequest: fetchRequest3)
-        _ = try? container.viewContext.executeAndMergeChanges(using: batchDeleteRequest3)
-
-        let fetchRequest4: NSFetchRequest<NSFetchRequestResult> = MainBudget.fetchRequest()
-        let batchDeleteRequest4 = NSBatchDeleteRequest(fetchRequest: fetchRequest4)
-        _ = try? container.viewContext.executeAndMergeChanges(using: batchDeleteRequest4)
-    }
-
-    func save() {
-        if container.viewContext.hasChanges {
-            try? container.viewContext.save()
-            WidgetCenter.shared.reloadAllTimelines()
-        }
-    }
-
-    func updateRecurringTransaction(transaction: Transaction) {
-        if transaction.nextTransactionDate < Calendar.current.startOfDay(for: Date.now) {
-            var holdingDate = transaction.nextTransactionDate
-
-            while holdingDate <= Calendar.current.startOfDay(for: Date.now) {
-                let newTransaction = Transaction(context: container.viewContext)
-                newTransaction.note = transaction.wrappedNote
-                newTransaction.category = transaction.category
-                newTransaction.amount = transaction.wrappedAmount
-                newTransaction.date = holdingDate
-                newTransaction.id = UUID()
-                newTransaction.income = transaction.income
-                newTransaction.day = holdingDate
-
-                let calendar = Calendar(identifier: .gregorian)
-
-                let dateComponents = calendar.dateComponents([.month, .year], from: holdingDate)
-
-                newTransaction.month = calendar.date(from: dateComponents)!
-
-                newTransaction.onceRecurring = true
-
-                var newDate: Date?
-
-                if transaction.recurringType == 1 {
-                    newDate = Calendar.current.date(byAdding: .day, value: Int(transaction.recurringCoefficient), to: holdingDate)!
-                } else if transaction.recurringType == 2 {
-                    newDate = Calendar.current.date(byAdding: .day, value: Int(transaction.recurringCoefficient * 7), to: holdingDate)!
-                } else if transaction.recurringType == 3 {
-                    newDate = Calendar.current.date(byAdding: .month, value: Int(transaction.recurringCoefficient), to: holdingDate)!
-                }
-
-                if newDate! > Calendar.current.startOfDay(for: Date.now) {
-                    newTransaction.recurringType = transaction.recurringType
-                    newTransaction.recurringCoefficient = transaction.recurringCoefficient
-                } else {
-                    newTransaction.recurringType = 0
-                }
-
-                holdingDate = newDate!
-            }
-
-            transaction.recurringType = 0
-
-            save()
-
-        } else if Calendar.current.isDateInToday(transaction.nextTransactionDate) {
-            let newTransaction = Transaction(context: container.viewContext)
-            newTransaction.note = transaction.wrappedNote
-            newTransaction.category = transaction.category
-            newTransaction.amount = transaction.wrappedAmount
-            newTransaction.date = transaction.nextTransactionDate
-            newTransaction.id = UUID()
-            newTransaction.income = transaction.income
-            newTransaction.day = transaction.nextTransactionDate
-
-            let calendar = Calendar(identifier: .gregorian)
-
-            let dateComponents = calendar.dateComponents([.month, .year], from: transaction.nextTransactionDate)
-
-            newTransaction.month = calendar.date(from: dateComponents)!
-
-            newTransaction.onceRecurring = true
-            newTransaction.recurringType = transaction.recurringType
-            newTransaction.recurringCoefficient = transaction.recurringCoefficient
-
-            transaction.recurringType = 0
-
-            save()
-        }
-    }
-
-    func updateRecurringTransactions() {
-        let recurringTransactions = results(for: fetchRequestForRecurringTransactions())
-
-        recurringTransactions.forEach { transaction in
-            updateRecurringTransaction(transaction: transaction)
-        }
-    }
-
-    func updateBudgetDates() {
-        let budgets = results(for: fetchRequestForBudgets())
-        let mainBudget = results(for: fetchRequestForMainBudget())
-
-        budgets.forEach { budget in
-            while budget.endDate <= Date.now {
-                budget.startDate = budget.endDate
-            }
-        }
-
-        mainBudget.forEach { budget in
-            while budget.endDate <= Date.now {
-                budget.startDate = budget.endDate
-            }
-        }
-
-        save()
-    }
-
-    func newTransaction(note: String, category: Category?, income: Bool, amount: Double, date: Date, repeatType: Int, repeatCoefficient: Int, delay _: Bool) -> Transaction {
-        let transaction = Transaction(context: container.viewContext)
-
-        if note.trimmingCharacters(in: .whitespacesAndNewlines) == "" {
-            transaction.note = category?.wrappedName ?? ""
-        } else {
-            transaction.note = note.trimmingCharacters(in: .whitespaces)
-        }
-
-        transaction.income = income
-
-        if let unwrappedCategory = category {
-            transaction.category = unwrappedCategory
-        }
-
-        transaction.amount = amount
-        transaction.date = date
-        transaction.id = UUID()
-
-        let calendar = Calendar(identifier: .gregorian)
-
-        transaction.day = calendar.date(bySettingHour: 0, minute: 0, second: 0, of: date) ?? Date.now
-
-        let dateComponents = calendar.dateComponents([.month, .year], from: date)
-
-        transaction.month = calendar.date(from: dateComponents) ?? Date.now
-
-        if repeatType > 0 {
-            transaction.onceRecurring = true
-            transaction.recurringType = Int16(repeatType)
-            transaction.recurringCoefficient = Int16(repeatCoefficient)
-            updateRecurringTransaction(transaction: transaction)
-        }
-
-        save()
-
-        return transaction
-    }
-
-    func newTemplateTransaction(order: Int) {
-        if let match = getTemplateTransaction(order: order) {
-            if let unwrappedCategory = match.category {
-                _ = newTransaction(note: match.note ?? "", category: unwrappedCategory, income: match.income, amount: match.amount, date: Date.now, repeatType: Int(match.recurringType), repeatCoefficient: Int(match.recurringCoefficient), delay: false)
-
-                addedTransaction = true
-            }
-        }
-    }
-
-    // fetching
-
-    func fetchRequestForRecurringTransactions() -> NSFetchRequest<Transaction> {
-        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
-        itemRequest.predicate = NSPredicate(format: "%K > %i", #keyPath(Transaction.recurringType), 0)
-        return itemRequest
-    }
-
-    func getTemplateTransaction(order: Int) -> TemplateTransaction? {
-        let itemRequest: NSFetchRequest<TemplateTransaction> = TemplateTransaction.fetchRequest()
-
-        itemRequest.predicate = NSPredicate(format: "order == %d", order)
-
-        let results = results(for: itemRequest)
-
-        if results.count > 1 {
-            let output = results.first
-
-            for i in 1 ..< results.count {
-                container.viewContext.delete(results[i])
-            }
-
-            save()
-
-            return output
-        } else {
-            return results.first
-        }
-    }
-
-    func getAllTemplateTransactions() -> [TemplateTransaction] {
-        let itemRequest: NSFetchRequest<TemplateTransaction> = TemplateTransaction.fetchRequest()
-
-        return results(for: itemRequest)
-    }
-
-    func fetchRequestForRecentTransactions(type: TimePeriod) -> NSFetchRequest<Transaction> {
-        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
-
-        var calendar = Calendar(identifier: .gregorian)
-
-        calendar.firstWeekday = UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.integer(forKey: "firstWeekday")
-        calendar.minimumDaysInFirstWeek = 4
-
-        switch type {
-        case .unknown:
-            return itemRequest
-        case .day:
-            let today = calendar.startOfDay(for: Date.now)
-            let nextDay = calendar.date(byAdding: .day, value: 1, to: today)!
-
-            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), today as CVarArg)
-            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), nextDay as CVarArg)
-
-            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
-
-            itemRequest.predicate = andPredicate
-            itemRequest.sortDescriptors = [
-                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
-            ]
-
-            return itemRequest
-        case .week:
-            let dateComponents = calendar.dateComponents([.weekOfYear, .yearForWeekOfYear], from: Date.now)
-
-            let thisWeek = calendar.date(from: dateComponents)!
-            let nextWeek = calendar.date(byAdding: .day, value: 7, to: thisWeek)!
-
-            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), thisWeek as CVarArg)
-            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), nextWeek as CVarArg)
-
-            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
-
-            itemRequest.predicate = andPredicate
-            itemRequest.sortDescriptors = [
-                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
-            ]
-
-            return itemRequest
-        case .month:
-            let dateComponents = calendar.dateComponents([.month, .year], from: Date.now)
-
-            let thisMonth = calendar.date(from: dateComponents)!
-            let nextMonth = calendar.date(byAdding: .month, value: 1, to: thisMonth)!
-
-            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), thisMonth as CVarArg)
-            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), nextMonth as CVarArg)
-
-            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
-
-            itemRequest.predicate = andPredicate
-            itemRequest.sortDescriptors = [
-                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
-            ]
-
-            return itemRequest
-        case .year:
-            let dateComponents = calendar.dateComponents([.year], from: Date.now)
-
-            let thisYear = calendar.date(from: dateComponents)!
-            let nextYear = calendar.date(byAdding: .year, value: 1, to: thisYear)!
-
-            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), thisYear as CVarArg)
-            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), nextYear as CVarArg)
-
-            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
-
-            itemRequest.predicate = andPredicate
-            itemRequest.sortDescriptors = [
-                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
-            ]
-
-            return itemRequest
-        }
-    }
-
-    func fetchRequestForExport() -> NSFetchRequest<Transaction> {
-        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
-        itemRequest.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
-        return itemRequest
-    }
-
-    func fetchRequestForCategoriesMigration(income: Bool? = nil) -> NSFetchRequest<Category> {
-        let itemRequest: NSFetchRequest<Category> = Category.fetchRequest()
-        itemRequest.sortDescriptors = [NSSortDescriptor(key: "dateCreated", ascending: true)]
-
-        if let unwrappedIncome = income {
-            itemRequest.predicate = NSPredicate(format: "income = %d", unwrappedIncome)
-            return itemRequest
-        } else {
-            return itemRequest
-        }
-    }
-
-    func fetchRequestForCategories(income: Bool) -> NSFetchRequest<Category> {
-        let itemRequest: NSFetchRequest<Category> = Category.fetchRequest()
-        itemRequest.sortDescriptors = [NSSortDescriptor(key: "order", ascending: true)]
-        itemRequest.predicate = NSPredicate(format: "income = %d", income)
-        return itemRequest
-    }
-
-    func getAllCategories(income: Bool) -> [Category] {
-        let request: NSFetchRequest<Category> = Category.fetchRequest()
-        request.sortDescriptors = [NSSortDescriptor(key: "order", ascending: true)]
-        request.predicate = NSPredicate(format: "income = %d", income)
-
-        return results(for: request)
-    }
-
-    func getSuggestedNotes(searchQuery: String, category: Category?, income: Bool) -> [Transaction] {
-        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
-        itemRequest.sortDescriptors = [NSSortDescriptor(keyPath: \Transaction.date, ascending: false)]
-
-        let beginPredicate = NSPredicate(format: "%K BEGINSWITH[cd] %@", #keyPath(Transaction.note), searchQuery)
-        let containPredicate = NSPredicate(format: "%K CONTAINS[cd] %@", #keyPath(Transaction.note), searchQuery)
-        let compound = NSCompoundPredicate(orPredicateWithSubpredicates: [beginPredicate, containPredicate])
-
-        let incomePredicate = NSPredicate(format: "income = %d", income)
-
-        if let unwrappedCategory = category {
-            let categoryPredicate = NSPredicate(format: "%K == %@", #keyPath(Transaction.category), unwrappedCategory)
-
-            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [compound, categoryPredicate, incomePredicate])
-
-            itemRequest.predicate = andPredicate
-        } else {
-            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [compound, incomePredicate])
-            itemRequest.predicate = andPredicate
-        }
-
-        let transactions = results(for: itemRequest)
-
-        var seen = [Transaction]()
-        let filtered = transactions.filter { entity -> Bool in
-            if seen.contains(where: { $0.wrappedNote == entity.wrappedNote }) {
-                return false
-            } else {
-                seen.append(entity)
-                return true
-            }
-        }
-
-        return filtered
-//
-//        let notes = transactions.map { $0.wrappedNote }
-//
-//        return Array(Set(notes))
-    }
-
-    @available(iOS 16, *)
-    func findCategory(withId id: UUID) throws -> Category {
-        let request: NSFetchRequest<Category> = Category.fetchRequest()
-        request.fetchLimit = 1
-        request.predicate = NSPredicate(format: "id = %@", id as CVarArg)
-
-        do {
-            guard let foundCategory = try container.viewContext.fetch(request).first else {
-                throw CustomError.notFound
-            }
-            return foundCategory
-        } catch {
-            throw CustomError.notFound
-        }
-    }
-
-    func getAllBudgets() -> [Budget] {
-        let request: NSFetchRequest<Budget> = Budget.fetchRequest()
-        request.sortDescriptors = [NSSortDescriptor(key: "dateCreated", ascending: true)]
-        return results(for: request)
-    }
-
-    @available(iOS 16, *)
-    func findBudget(withId id: UUID) throws -> Budget {
-        let request: NSFetchRequest<Budget> = Budget.fetchRequest()
-        request.fetchLimit = 1
-        request.predicate = NSPredicate(format: "id = %@", id as CVarArg)
-
-        do {
-            guard let foundBudget = try container.viewContext.fetch(request).first else {
-                throw CustomError.notFound
-            }
-            return foundBudget
-        } catch {
-            throw CustomError.notFound
-        }
-    }
+#endif
 
     func categoryCheck(name: String, emoji: String, income: Bool) -> (error: CategoryError, order: Int64) {
         if name.trimmingCharacters(in: .whitespacesAndNewlines) == "" && emoji == "" {
@@ -697,16 +290,142 @@ class DataController: ObservableObject {
         }
     }
 
+    // adding or deleting
+
+    func deleteAll() {
+        let fetchRequest1: NSFetchRequest<NSFetchRequestResult> = Transaction.fetchRequest()
+        let batchDeleteRequest1 = NSBatchDeleteRequest(fetchRequest: fetchRequest1)
+        _ = try? container.viewContext.executeAndMergeChanges(using: batchDeleteRequest1)
+
+        let fetchRequest2: NSFetchRequest<NSFetchRequestResult> = Category.fetchRequest()
+        let batchDeleteRequest2 = NSBatchDeleteRequest(fetchRequest: fetchRequest2)
+        _ = try? container.viewContext.executeAndMergeChanges(using: batchDeleteRequest2)
+
+        let fetchRequest3: NSFetchRequest<NSFetchRequestResult> = Budget.fetchRequest()
+        let batchDeleteRequest3 = NSBatchDeleteRequest(fetchRequest: fetchRequest3)
+        _ = try? container.viewContext.executeAndMergeChanges(using: batchDeleteRequest3)
+
+        let fetchRequest4: NSFetchRequest<NSFetchRequestResult> = MainBudget.fetchRequest()
+        let batchDeleteRequest4 = NSBatchDeleteRequest(fetchRequest: fetchRequest4)
+        _ = try? container.viewContext.executeAndMergeChanges(using: batchDeleteRequest4)
+    }
+
     func fetchRequestForBudgets() -> NSFetchRequest<Budget> {
         let itemRequest: NSFetchRequest<Budget> = Budget.fetchRequest()
 
         return itemRequest
     }
 
-    func fetchRequestForMainBudget() -> NSFetchRequest<MainBudget> {
-        let itemRequest: NSFetchRequest<MainBudget> = MainBudget.fetchRequest()
+    func fetchRequestForBudgetTransactions(budget: Budget) -> NSFetchRequest<Transaction> {
+        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
+
+        let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), budget.startDate! as CVarArg)
+        let endPredicate = NSPredicate(format: "%K <= %@", #keyPath(Transaction.date), Date.now as CVarArg)
+        let categoryPredicate = NSPredicate(format: "%K == %@", #keyPath(Transaction.category), budget.category!)
+        let incomePredicate = NSPredicate(format: "income = %d", false)
+
+        let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate, categoryPredicate, incomePredicate])
+
+        itemRequest.predicate = andPredicate
 
         return itemRequest
+    }
+
+    func fetchRequestForCategories(income: Bool) -> NSFetchRequest<Category> {
+        let itemRequest: NSFetchRequest<Category> = Category.fetchRequest()
+        itemRequest.sortDescriptors = [NSSortDescriptor(key: "order", ascending: true)]
+        itemRequest.predicate = NSPredicate(format: "income = %d", income)
+        return itemRequest
+    }
+
+    func fetchRequestForCategoriesMigration(income: Bool? = nil) -> NSFetchRequest<Category> {
+        let itemRequest: NSFetchRequest<Category> = Category.fetchRequest()
+        itemRequest.sortDescriptors = [NSSortDescriptor(key: "dateCreated", ascending: true)]
+
+        if let unwrappedIncome = income {
+            itemRequest.predicate = NSPredicate(format: "income = %d", unwrappedIncome)
+            return itemRequest
+        } else {
+            return itemRequest
+        }
+    }
+
+    func fetchRequestForExport() -> NSFetchRequest<Transaction> {
+        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
+        itemRequest.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
+        return itemRequest
+    }
+
+    func fetchRequestForInsights(type: Int, date: Date, income: Bool? = nil) -> NSFetchRequest<Transaction> {
+        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
+
+        var calendar = Calendar(identifier: .gregorian)
+
+        calendar.firstWeekday = UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.integer(forKey: "firstWeekday")
+        calendar.minimumDaysInFirstWeek = 4
+
+        let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), date as CVarArg)
+
+        let endPredicate: NSPredicate
+
+        if type == 1 {
+            if calendar.isDate(date, equalTo: Date.now, toGranularity: .weekOfYear) {
+                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
+            } else {
+                let next = calendar.date(byAdding: .day, value: 7, to: date) ?? Date.now
+                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), next as CVarArg)
+            }
+        } else if type == 2 {
+            let next = calendar.date(byAdding: .month, value: 1, to: date) ?? Date.now
+
+//            let endOfPeriod = calendar.date(byAdding: .day, value: -1, to: next) ?? Date.now
+//
+            if next > Date.now {
+                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
+            } else {
+                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), next as CVarArg)
+            }
+//
+//            if calendar.isDate(date, equalTo: Date.now, toGranularity: .month) {
+//                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
+//            } else {
+//
+//                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), next as CVarArg)
+//            }
+        } else {
+            if calendar.isDate(date, equalTo: Date.now, toGranularity: .year) {
+                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
+            } else {
+                let next = calendar.date(byAdding: .year, value: 1, to: date) ?? Date.now
+                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), next as CVarArg)
+            }
+        }
+
+        let andPredicate: NSCompoundPredicate
+
+        if let unwrappedIncome = income {
+            let incomePredicate = NSPredicate(format: "income = %d", unwrappedIncome)
+
+            andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, incomePredicate, endPredicate])
+        } else {
+            andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
+        }
+
+        itemRequest.predicate = andPredicate
+
+        return itemRequest
+    }
+
+    func fetchRequestForLineGraph(optionalIncome: Bool?) -> NSFetchRequest<Transaction> {
+        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
+        itemRequest.sortDescriptors = [NSSortDescriptor(keyPath: \Transaction.date, ascending: true)]
+
+        if let income = optionalIncome {
+            itemRequest.predicate = NSPredicate(format: "income = %d", income)
+            return itemRequest
+        } else {
+            return itemRequest
+        }
     }
 
     func fetchRequestForLogView(type: Int, optionalIncome: Bool?, categoryFilters: [Category] = []) -> NSFetchRequest<Transaction> {
@@ -806,377 +525,336 @@ class DataController: ObservableObject {
 
     }
 
-    func getShortcutInsights(type: Int, timeframe: Int, optionalIncome: Bool?, categories: [Category]) -> Double {
-        let fetchRequest = fetchRequestForLogView(type: timeframe, optionalIncome: optionalIncome, categoryFilters: categories)
-        let allTransactions = results(for: fetchRequest)
+    func fetchRequestForLogViewCategoryFilter(income: Bool) -> NSFetchRequest<Transaction> {
+        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
+        itemRequest.predicate = NSPredicate(format: "income = %d", income)
+        return itemRequest
+    }
 
-        if type == 1 {
-            var total = 0.0
+    func fetchRequestForMainBudget() -> NSFetchRequest<MainBudget> {
+        let itemRequest: NSFetchRequest<MainBudget> = MainBudget.fetchRequest()
 
-            allTransactions.forEach { transaction in
-                if transaction.income {
-                    total += transaction.amount
-                } else {
-                    total -= transaction.amount
-                }
+        return itemRequest
+    }
+
+    func fetchRequestForMainBudgetTransactions(budget: MainBudget) -> NSFetchRequest<Transaction> {
+        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
+
+        let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), budget.startDate! as CVarArg)
+        let endPredicate = NSPredicate(format: "%K <= %@", #keyPath(Transaction.date), Date.now as CVarArg)
+        let incomePredicate = NSPredicate(format: "income = %d", false)
+
+        let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate, incomePredicate])
+
+        itemRequest.predicate = andPredicate
+
+        return itemRequest
+    }
+
+    func fetchRequestForMainBudgetWidget() -> (found: Bool, totalSpent: Double, budgetAmount: Double, percentage: Double, type: Int, startDate: Date) {
+        let holding = results(for: fetchRequestForMainBudget())
+
+        if let budget = holding.first {
+            let itemRequest = fetchRequestForMainBudgetTransactions(budget: budget)
+//
+            let transactions = results(for: itemRequest)
+
+            var holdingTotal = 0.0
+            transactions.forEach { transaction in
+                holdingTotal += transaction.wrappedAmount
             }
 
-            return total
-        } else {
-            var total = 0.0
+            let percentageOfDays: Double
 
-            allTransactions.forEach { transaction in
-                total += transaction.amount
-            }
+            let calendar = Calendar.current
 
-            return total
-        }
-    }
-
-    func getLogViewTotalSpent(type: Int) -> Double {
-        let fetchRequest = fetchRequestForLogView(type: type, optionalIncome: false)
-        let allTransactions = visibleTransactions(results(for: fetchRequest))
-
-        var total = 0.0
-
-        allTransactions.forEach { transaction in
-            total += transaction.amount
-        }
-
-        return total
-    }
-
-    func getLogViewTotalIncome(type: Int) -> Double {
-        let fetchRequest = fetchRequestForLogView(type: type, optionalIncome: true)
-        let allTransactions = visibleTransactions(results(for: fetchRequest))
-
-        var total = 0.0
-
-        allTransactions.forEach { transaction in
-            total += transaction.amount
-        }
-
-        return total
-    }
-
-    func getLogViewTotalNet(type: Int) -> (value: Double, positive: Bool) {
-        let fetchRequest = fetchRequestForLogView(type: type, optionalIncome: nil)
-        let allTransactions = visibleTransactions(results(for: fetchRequest))
-
-        var total = 0.0
-
-        allTransactions.forEach { transaction in
-            if transaction.income {
-                total += transaction.amount
+            if budget.type == 1 {
+                let components = calendar.dateComponents([.minute], from: budget.startDate!, to: Date.now)
+                percentageOfDays = Double(components.minute!) / 1440
             } else {
-                total -= transaction.amount
-            }
-        }
+                let components1 = calendar.dateComponents([.day], from: budget.startDate!, to: budget.endDate)
+                let numberOfDays = components1.day!
 
-        if total >= 0 {
-            return (total, true)
+                let components2 = calendar.dateComponents([.day], from: budget.startDate!, to: Date.now)
+                let numberOfDaysPast = components2.day!
+
+                percentageOfDays = Double(numberOfDaysPast) / Double(numberOfDays)
+            }
+
+            return (true, holdingTotal, budget.amount, percentageOfDays, Int(budget.type), budget.startDate!)
+
         } else {
-            return (abs(total), false)
+            return (false, 0, 0, 0, 0, Date.now)
         }
     }
 
-    func getLineGraphDataNet(type: Int) -> [LineGraphDataPoint] {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date.now)
+    func fetchRequestForRecentTransactions(type: TimePeriod) -> NSFetchRequest<Transaction> {
+        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
 
-        let fetchRequest = fetchRequestForLineGraph(optionalIncome: nil)
-        let transactions = visibleTransactions(results(for: fetchRequest))
+        var calendar = Calendar(identifier: .gregorian)
 
-        var holdingDataPoints = [LineGraphDataPoint]()
-        var totalForDay = 0.0
+        calendar.firstWeekday = UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.integer(forKey: "firstWeekday")
+        calendar.minimumDaysInFirstWeek = 4
 
-        if type < 3 {
-            let lastWeek = Calendar.current.date(byAdding: .day, value: -7, to: today)!
-            var changingDate = Calendar.current.date(byAdding: .second, value: 86399, to: lastWeek)!
+        switch type {
+        case .unknown:
+            return itemRequest
+        case .day:
+            let today = calendar.startOfDay(for: Date.now)
+            let nextDay = calendar.date(byAdding: .day, value: 1, to: today)!
 
-            for transaction in transactions {
-                if transaction.wrappedDate < changingDate {
-                    if transaction.income {
-                        totalForDay += transaction.amount
-                    } else {
-                        totalForDay -= transaction.amount
-                    }
-                } else {
-                    let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
-                    holdingDataPoints.append(newData)
-                    changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), today as CVarArg)
+            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), nextDay as CVarArg)
 
-                    while transaction.wrappedDate > changingDate {
-                        let anotherNewData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
-                        holdingDataPoints.append(anotherNewData)
-                        changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
-                    }
+            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
 
-                    if transaction.income {
-                        totalForDay += transaction.amount
-                    } else {
-                        totalForDay -= transaction.amount
-                    }
-                }
-            }
+            itemRequest.predicate = andPredicate
+            itemRequest.sortDescriptors = [
+                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
+            ]
 
-            let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
-            holdingDataPoints.append(newData)
+            return itemRequest
+        case .week:
+            let dateComponents = calendar.dateComponents([.weekOfYear, .yearForWeekOfYear], from: Date.now)
 
-            if changingDate < today {
-                changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+            let thisWeek = calendar.date(from: dateComponents)!
+            let nextWeek = calendar.date(byAdding: .day, value: 7, to: thisWeek)!
 
-                while changingDate < today {
-                    let anotherNewData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
-                    holdingDataPoints.append(anotherNewData)
-                    changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
-                }
+            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), thisWeek as CVarArg)
+            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), nextWeek as CVarArg)
 
-                let finalDate = LineGraphDataPoint(date: today, amount: totalForDay)
-                holdingDataPoints.append(finalDate)
-            }
-        } else if type == 3 {
-            let lastMonth = Calendar.current.date(byAdding: .month, value: -1, to: today)!
-            var changingDate = Calendar.current.date(byAdding: .second, value: 86399, to: lastMonth)!
+            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
 
-            for transaction in transactions {
-                if transaction.wrappedDate < changingDate {
-                    if transaction.income {
-                        totalForDay += transaction.amount
-                    } else {
-                        totalForDay -= transaction.amount
-                    }
-                } else {
-                    let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
-                    holdingDataPoints.append(newData)
-                    changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+            itemRequest.predicate = andPredicate
+            itemRequest.sortDescriptors = [
+                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
+            ]
 
-                    while transaction.wrappedDate > changingDate {
-                        let anotherNewData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
-                        holdingDataPoints.append(anotherNewData)
-                        changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
-                    }
-
-                    if transaction.income {
-                        totalForDay += transaction.amount
-                    } else {
-                        totalForDay -= transaction.amount
-                    }
-                }
-            }
-
-            let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
-            holdingDataPoints.append(newData)
-
-            if changingDate < today {
-                changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
-
-                while changingDate < today {
-                    let anotherNewData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
-                    holdingDataPoints.append(anotherNewData)
-                    changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
-                }
-
-                let finalDate = LineGraphDataPoint(date: today, amount: totalForDay)
-                holdingDataPoints.append(finalDate)
-            }
-        } else if type == 4 {
+            return itemRequest
+        case .month:
             let dateComponents = calendar.dateComponents([.month, .year], from: Date.now)
+
             let thisMonth = calendar.date(from: dateComponents)!
             let nextMonth = calendar.date(byAdding: .month, value: 1, to: thisMonth)!
-            var changingDate = calendar.date(byAdding: .year, value: -1, to: nextMonth)!
 
-            for transaction in transactions {
-                if transaction.wrappedDate < changingDate {
-                    if transaction.income {
-                        totalForDay += transaction.amount
-                    } else {
-                        totalForDay -= transaction.amount
-                    }
-                } else {
-                    let dataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
-                    let newData = LineGraphDataPoint(date: dataDate, amount: totalForDay)
-                    holdingDataPoints.append(newData)
-                    changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
+            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), thisMonth as CVarArg)
+            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), nextMonth as CVarArg)
 
-                    while transaction.wrappedDate > changingDate {
-                        let newDataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
-                        let anotherNewData = LineGraphDataPoint(date: newDataDate, amount: totalForDay)
-                        holdingDataPoints.append(anotherNewData)
-                        changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
-                    }
+            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
 
-                    if transaction.income {
-                        totalForDay += transaction.amount
-                    } else {
-                        totalForDay -= transaction.amount
-                    }
-                }
-            }
+            itemRequest.predicate = andPredicate
+            itemRequest.sortDescriptors = [
+                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
+            ]
 
-            let dataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
-            let newData = LineGraphDataPoint(date: dataDate, amount: totalForDay)
-            holdingDataPoints.append(newData)
+            return itemRequest
+        case .year:
+            let dateComponents = calendar.dateComponents([.year], from: Date.now)
 
-            if changingDate < nextMonth {
-                changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
+            let thisYear = calendar.date(from: dateComponents)!
+            let nextYear = calendar.date(byAdding: .year, value: 1, to: thisYear)!
 
-                while changingDate < nextMonth {
-                    let anotherDataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
-                    let anotherNewData = LineGraphDataPoint(date: anotherDataDate, amount: totalForDay)
-                    holdingDataPoints.append(anotherNewData)
-                    changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
-                }
+            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), thisYear as CVarArg)
+            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), nextYear as CVarArg)
 
-                let finalDate = LineGraphDataPoint(date: today, amount: totalForDay)
-                holdingDataPoints.append(finalDate)
-            }
+            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
+
+            itemRequest.predicate = andPredicate
+            itemRequest.sortDescriptors = [
+                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
+            ]
+
+            return itemRequest
         }
-
-        return holdingDataPoints
     }
 
-    func getLineGraphData(income: Bool, type: Int) -> [LineGraphDataPoint] {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date.now)
+    func fetchRequestForRecentTransactionsWithCount(type: TimePeriod, count: Int) -> NSFetchRequest<Transaction> {
+        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
 
-        let fetchRequest = fetchRequestForLineGraph(optionalIncome: income)
-        let transactions = visibleTransactions(results(for: fetchRequest))
+        var calendar = Calendar(identifier: .gregorian)
 
-        var holdingDataPoints = [LineGraphDataPoint]()
-        var totalForDay = 0.0
+        calendar.firstWeekday = UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.integer(forKey: "firstWeekday")
+        calendar.minimumDaysInFirstWeek = 4
 
-        if type < 3 {
-            let lastWeek = Calendar.current.date(byAdding: .day, value: -7, to: today)!
-            var changingDate = Calendar.current.date(byAdding: .second, value: 86399, to: lastWeek)!
+        switch type {
+        case .unknown:
+            return itemRequest
+        case .day:
+            let today = calendar.startOfDay(for: Date.now)
 
-            for transaction in transactions {
-                if transaction.wrappedDate > lastWeek {
-                    if transaction.wrappedDate < changingDate {
-                        totalForDay += transaction.wrappedAmount
-                    } else {
-                        let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
-                        holdingDataPoints.append(newData)
-                        changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
-                        totalForDay = 0
+            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), today as CVarArg)
+            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
 
-                        while transaction.wrappedDate > changingDate {
-                            let anotherNewData = LineGraphDataPoint(date: changingDate, amount: 0)
-                            holdingDataPoints.append(anotherNewData)
-                            changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
-                        }
+            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
 
-                        totalForDay += transaction.wrappedAmount
-                    }
-                }
-            }
+            itemRequest.predicate = andPredicate
+            itemRequest.sortDescriptors = [
+                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
+            ]
+            itemRequest.fetchLimit = count
 
-            let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
-            holdingDataPoints.append(newData)
-            totalForDay = 0
+            return itemRequest
+        case .week:
+            let dateComponents = calendar.dateComponents([.weekOfYear, .yearForWeekOfYear], from: Date.now)
 
-            if changingDate < today {
-                changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+            let thisWeek = calendar.date(from: dateComponents)!
 
-                while changingDate < today {
-                    let anotherNewData = LineGraphDataPoint(date: changingDate, amount: 0)
-                    holdingDataPoints.append(anotherNewData)
-                    changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
-                }
+            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), thisWeek as CVarArg)
+            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
 
-                let finalDate = LineGraphDataPoint(date: today, amount: totalForDay)
-                holdingDataPoints.append(finalDate)
-            }
-        } else if type == 3 {
-            let lastMonth = Calendar.current.date(byAdding: .month, value: -1, to: today)!
-            var changingDate = Calendar.current.date(byAdding: .second, value: 86399, to: lastMonth)!
+            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
 
-            for transaction in transactions {
-                if transaction.wrappedDate > lastMonth {
-                    if transaction.wrappedDate < changingDate {
-                        totalForDay += transaction.wrappedAmount
-                    } else {
-                        let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
-                        holdingDataPoints.append(newData)
-                        changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
-                        totalForDay = 0
+            itemRequest.predicate = andPredicate
+            itemRequest.sortDescriptors = [
+                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
+            ]
+            itemRequest.fetchLimit = count
 
-                        while transaction.wrappedDate > changingDate {
-                            let anotherNewData = LineGraphDataPoint(date: changingDate, amount: 0)
-                            holdingDataPoints.append(anotherNewData)
-                            changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
-                        }
-
-                        totalForDay += transaction.wrappedAmount
-                    }
-                }
-            }
-
-            let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
-            holdingDataPoints.append(newData)
-
-            if changingDate < today {
-                changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
-
-                while changingDate < today {
-                    let anotherNewData = LineGraphDataPoint(date: changingDate, amount: 0)
-                    holdingDataPoints.append(anotherNewData)
-                    changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
-                }
-
-                let finalDate = LineGraphDataPoint(date: today, amount: 0)
-                holdingDataPoints.append(finalDate)
-            }
-        } else if type == 4 {
+            return itemRequest
+        case .month:
             let dateComponents = calendar.dateComponents([.month, .year], from: Date.now)
+
             let thisMonth = calendar.date(from: dateComponents)!
-            let thisMonthLastYear = calendar.date(byAdding: .year, value: -1, to: thisMonth)!
-            let nextMonth = calendar.date(byAdding: .month, value: 1, to: thisMonth)!
-            var changingDate = calendar.date(byAdding: .year, value: -1, to: nextMonth)!
 
-            for transaction in transactions {
-                if transaction.wrappedDate > thisMonthLastYear {
-                    if transaction.wrappedDate < changingDate {
-                        totalForDay += transaction.wrappedAmount
-                    } else {
-                        let dataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
-                        let newData = LineGraphDataPoint(date: dataDate, amount: totalForDay)
-                        holdingDataPoints.append(newData)
-                        changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
-                        totalForDay = 0
+            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), thisMonth as CVarArg)
+            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
 
-                        while transaction.wrappedDate > changingDate {
-                            let newDataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
-                            let anotherNewData = LineGraphDataPoint(date: newDataDate, amount: 0)
-                            holdingDataPoints.append(anotherNewData)
-                            changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
-                        }
+            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
 
-                        totalForDay += transaction.wrappedAmount
-                    }
-                }
-            }
+            itemRequest.predicate = andPredicate
+            itemRequest.sortDescriptors = [
+                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
+            ]
+            itemRequest.fetchLimit = count
 
-            let dataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
-            let newData = LineGraphDataPoint(date: dataDate, amount: totalForDay)
-            holdingDataPoints.append(newData)
+            return itemRequest
+        case .year:
+            let dateComponents = calendar.dateComponents([.year], from: Date.now)
 
-            if changingDate < nextMonth {
-                changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
+            let thisYear = calendar.date(from: dateComponents)!
 
-                while changingDate < nextMonth {
-                    let anotherDataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
-                    let anotherNewData = LineGraphDataPoint(date: anotherDataDate, amount: 0)
-                    holdingDataPoints.append(anotherNewData)
-                    changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
-                }
+            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), thisYear as CVarArg)
+            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
 
-                let finalDate = LineGraphDataPoint(date: today, amount: 0)
-                holdingDataPoints.append(finalDate)
-            }
+            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
+
+            itemRequest.predicate = andPredicate
+            itemRequest.sortDescriptors = [
+                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
+            ]
+            itemRequest.fetchLimit = count
+
+            return itemRequest
+        }
+    }
+
+    // fetching
+
+    func fetchRequestForRecurringTransactions() -> NSFetchRequest<Transaction> {
+        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
+        itemRequest.predicate = NSPredicate(format: "%K > %i", #keyPath(Transaction.recurringType), 0)
+        return itemRequest
+    }
+
+    func fetchRequestForWidgetInsights(type: InsightsTimePeriod, income: Bool) -> (fetchRequest: NSFetchRequest<Transaction>, date: Date) {
+        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
+
+        var calendar = Calendar(identifier: .gregorian)
+
+        calendar.firstWeekday = UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.integer(forKey: "firstWeekday")
+        calendar.minimumDaysInFirstWeek = 4
+
+        let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
+
+        let incomePredicate = NSPredicate(format: "income = %d", income)
+
+        let startDate: Date
+        let startPredicate: NSPredicate
+
+        switch type {
+        case .unknown:
+            startDate = Date.now
+            startPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
+        case .week:
+            let dateComponents = calendar.dateComponents([.weekOfYear, .yearForWeekOfYear], from: Date.now)
+
+            startDate = calendar.date(from: dateComponents)!
+
+            startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), startDate as CVarArg)
+        case .month:
+            let startOfMonth = UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.integer(forKey: "firstDayOfMonth")
+
+            startDate = getStartOfMonth(startDay: startOfMonth)
+
+            startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), startDate as CVarArg)
+        case .year:
+            let dateComponents = calendar.dateComponents([.year], from: Date.now)
+
+            startDate = calendar.date(from: dateComponents)!
+
+            startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), startDate as CVarArg)
         }
 
-        return holdingDataPoints
+        let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate, incomePredicate])
+
+        itemRequest.predicate = andPredicate
+        itemRequest.sortDescriptors = [
+            NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
+        ]
+
+        return (itemRequest, startDate)
+    }
+
+    @available(iOS 16, *)
+    func findBudget(withId id: UUID) throws -> Budget {
+        let request: NSFetchRequest<Budget> = Budget.fetchRequest()
+        request.fetchLimit = 1
+        request.predicate = NSPredicate(format: "id = %@", id as CVarArg)
+
+        do {
+            guard let foundBudget = try container.viewContext.fetch(request).first else {
+                throw CustomError.notFound
+            }
+            return foundBudget
+        } catch {
+            throw CustomError.notFound
+        }
+    }
+
+    @available(iOS 16, *)
+    func findCategory(withId id: UUID) throws -> Category {
+        let request: NSFetchRequest<Category> = Category.fetchRequest()
+        request.fetchLimit = 1
+        request.predicate = NSPredicate(format: "id = %@", id as CVarArg)
+
+        do {
+            guard let foundCategory = try container.viewContext.fetch(request).first else {
+                throw CustomError.notFound
+            }
+            return foundCategory
+        } catch {
+            throw CustomError.notFound
+        }
+    }
+
+    func getAllBudgets() -> [Budget] {
+        let request: NSFetchRequest<Budget> = Budget.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "dateCreated", ascending: true)]
+        return results(for: request)
+    }
+
+    func getAllCategories(income: Bool) -> [Category] {
+        let request: NSFetchRequest<Category> = Category.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "order", ascending: true)]
+        request.predicate = NSPredicate(format: "income = %d", income)
+
+        return results(for: request)
+    }
+
+    func getAllTemplateTransactions() -> [TemplateTransaction] {
+        let itemRequest: NSFetchRequest<TemplateTransaction> = TemplateTransaction.fetchRequest()
+
+        return results(for: itemRequest)
     }
 
     func getBudgetLeftover(budget: Budget? = nil, overallBudget: MainBudget? = nil) -> Double {
@@ -1203,53 +881,6 @@ class DataController: ObservableObject {
         }
 
         return budgetAmount - totalSpent
-    }
-
-    func fetchRequestForMainBudgetTransactions(budget: MainBudget) -> NSFetchRequest<Transaction> {
-        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
-
-        let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), budget.startDate! as CVarArg)
-        let endPredicate = NSPredicate(format: "%K <= %@", #keyPath(Transaction.date), Date.now as CVarArg)
-        let incomePredicate = NSPredicate(format: "income = %d", false)
-
-        let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate, incomePredicate])
-
-        itemRequest.predicate = andPredicate
-
-        return itemRequest
-    }
-
-    func fetchRequestForBudgetTransactions(budget: Budget) -> NSFetchRequest<Transaction> {
-        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
-
-        let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), budget.startDate! as CVarArg)
-        let endPredicate = NSPredicate(format: "%K <= %@", #keyPath(Transaction.date), Date.now as CVarArg)
-        let categoryPredicate = NSPredicate(format: "%K == %@", #keyPath(Transaction.category), budget.category!)
-        let incomePredicate = NSPredicate(format: "income = %d", false)
-
-        let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate, categoryPredicate, incomePredicate])
-
-        itemRequest.predicate = andPredicate
-
-        return itemRequest
-    }
-
-    func fetchRequestForLineGraph(optionalIncome: Bool?) -> NSFetchRequest<Transaction> {
-        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
-        itemRequest.sortDescriptors = [NSSortDescriptor(keyPath: \Transaction.date, ascending: true)]
-
-        if let income = optionalIncome {
-            itemRequest.predicate = NSPredicate(format: "income = %d", income)
-            return itemRequest
-        } else {
-            return itemRequest
-        }
-    }
-
-    func fetchRequestForLogViewCategoryFilter(income: Bool) -> NSFetchRequest<Transaction> {
-        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
-        itemRequest.predicate = NSPredicate(format: "income = %d", income)
-        return itemRequest
     }
 
     func getInsights(type: Int, date: Date, income: Bool) -> (amount: Double, maximum: Double, average: Double, numberOfDays: Int, dates: [Date], dateDictionary: [Date: Double]) {
@@ -1435,66 +1066,6 @@ class DataController: ObservableObject {
         }
     }
 
-    func fetchRequestForInsights(type: Int, date: Date, income: Bool? = nil) -> NSFetchRequest<Transaction> {
-        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
-
-        var calendar = Calendar(identifier: .gregorian)
-
-        calendar.firstWeekday = UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.integer(forKey: "firstWeekday")
-        calendar.minimumDaysInFirstWeek = 4
-
-        let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), date as CVarArg)
-
-        let endPredicate: NSPredicate
-
-        if type == 1 {
-            if calendar.isDate(date, equalTo: Date.now, toGranularity: .weekOfYear) {
-                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
-            } else {
-                let next = calendar.date(byAdding: .day, value: 7, to: date) ?? Date.now
-                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), next as CVarArg)
-            }
-        } else if type == 2 {
-            let next = calendar.date(byAdding: .month, value: 1, to: date) ?? Date.now
-
-//            let endOfPeriod = calendar.date(byAdding: .day, value: -1, to: next) ?? Date.now
-//
-            if next > Date.now {
-                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
-            } else {
-                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), next as CVarArg)
-            }
-//
-//            if calendar.isDate(date, equalTo: Date.now, toGranularity: .month) {
-//                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
-//            } else {
-//
-//                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), next as CVarArg)
-//            }
-        } else {
-            if calendar.isDate(date, equalTo: Date.now, toGranularity: .year) {
-                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
-            } else {
-                let next = calendar.date(byAdding: .year, value: 1, to: date) ?? Date.now
-                endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), next as CVarArg)
-            }
-        }
-
-        let andPredicate: NSCompoundPredicate
-
-        if let unwrappedIncome = income {
-            let incomePredicate = NSPredicate(format: "income = %d", unwrappedIncome)
-
-            andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, incomePredicate, endPredicate])
-        } else {
-            andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
-        }
-
-        itemRequest.predicate = andPredicate
-
-        return itemRequest
-    }
-
     func getInsightsSummary(type: Int, date: Date) -> (spent: Double, income: Double, net: Double, positive: Bool, average: Double) {
         let itemRequest: NSFetchRequest<Transaction> = fetchRequestForInsights(type: type, date: date)
         let currentTransactions = results(for: itemRequest)
@@ -1566,174 +1137,626 @@ class DataController: ObservableObject {
         }
     }
 
-    func fetchRequestForWidgetInsights(type: InsightsTimePeriod, income: Bool) -> (fetchRequest: NSFetchRequest<Transaction>, date: Date) {
+    func getLineGraphData(income: Bool, type: Int) -> [LineGraphDataPoint] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date.now)
+
+        let fetchRequest = fetchRequestForLineGraph(optionalIncome: income)
+        let transactions = visibleTransactions(results(for: fetchRequest))
+
+        var holdingDataPoints = [LineGraphDataPoint]()
+        var totalForDay = 0.0
+
+        if type < 3 {
+            let lastWeek = Calendar.current.date(byAdding: .day, value: -7, to: today)!
+            var changingDate = Calendar.current.date(byAdding: .second, value: 86399, to: lastWeek)!
+
+            for transaction in transactions {
+                if transaction.wrappedDate > lastWeek {
+                    if transaction.wrappedDate < changingDate {
+                        totalForDay += transaction.wrappedAmount
+                    } else {
+                        let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
+                        holdingDataPoints.append(newData)
+                        changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+                        totalForDay = 0
+
+                        while transaction.wrappedDate > changingDate {
+                            let anotherNewData = LineGraphDataPoint(date: changingDate, amount: 0)
+                            holdingDataPoints.append(anotherNewData)
+                            changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+                        }
+
+                        totalForDay += transaction.wrappedAmount
+                    }
+                }
+            }
+
+            let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
+            holdingDataPoints.append(newData)
+            totalForDay = 0
+
+            if changingDate < today {
+                changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+
+                while changingDate < today {
+                    let anotherNewData = LineGraphDataPoint(date: changingDate, amount: 0)
+                    holdingDataPoints.append(anotherNewData)
+                    changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+                }
+
+                let finalDate = LineGraphDataPoint(date: today, amount: totalForDay)
+                holdingDataPoints.append(finalDate)
+            }
+        } else if type == 3 {
+            let lastMonth = Calendar.current.date(byAdding: .month, value: -1, to: today)!
+            var changingDate = Calendar.current.date(byAdding: .second, value: 86399, to: lastMonth)!
+
+            for transaction in transactions {
+                if transaction.wrappedDate > lastMonth {
+                    if transaction.wrappedDate < changingDate {
+                        totalForDay += transaction.wrappedAmount
+                    } else {
+                        let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
+                        holdingDataPoints.append(newData)
+                        changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+                        totalForDay = 0
+
+                        while transaction.wrappedDate > changingDate {
+                            let anotherNewData = LineGraphDataPoint(date: changingDate, amount: 0)
+                            holdingDataPoints.append(anotherNewData)
+                            changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+                        }
+
+                        totalForDay += transaction.wrappedAmount
+                    }
+                }
+            }
+
+            let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
+            holdingDataPoints.append(newData)
+
+            if changingDate < today {
+                changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+
+                while changingDate < today {
+                    let anotherNewData = LineGraphDataPoint(date: changingDate, amount: 0)
+                    holdingDataPoints.append(anotherNewData)
+                    changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+                }
+
+                let finalDate = LineGraphDataPoint(date: today, amount: 0)
+                holdingDataPoints.append(finalDate)
+            }
+        } else if type == 4 {
+            let dateComponents = calendar.dateComponents([.month, .year], from: Date.now)
+            let thisMonth = calendar.date(from: dateComponents)!
+            let thisMonthLastYear = calendar.date(byAdding: .year, value: -1, to: thisMonth)!
+            let nextMonth = calendar.date(byAdding: .month, value: 1, to: thisMonth)!
+            var changingDate = calendar.date(byAdding: .year, value: -1, to: nextMonth)!
+
+            for transaction in transactions {
+                if transaction.wrappedDate > thisMonthLastYear {
+                    if transaction.wrappedDate < changingDate {
+                        totalForDay += transaction.wrappedAmount
+                    } else {
+                        let dataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
+                        let newData = LineGraphDataPoint(date: dataDate, amount: totalForDay)
+                        holdingDataPoints.append(newData)
+                        changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
+                        totalForDay = 0
+
+                        while transaction.wrappedDate > changingDate {
+                            let newDataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
+                            let anotherNewData = LineGraphDataPoint(date: newDataDate, amount: 0)
+                            holdingDataPoints.append(anotherNewData)
+                            changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
+                        }
+
+                        totalForDay += transaction.wrappedAmount
+                    }
+                }
+            }
+
+            let dataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
+            let newData = LineGraphDataPoint(date: dataDate, amount: totalForDay)
+            holdingDataPoints.append(newData)
+
+            if changingDate < nextMonth {
+                changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
+
+                while changingDate < nextMonth {
+                    let anotherDataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
+                    let anotherNewData = LineGraphDataPoint(date: anotherDataDate, amount: 0)
+                    holdingDataPoints.append(anotherNewData)
+                    changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
+                }
+
+                let finalDate = LineGraphDataPoint(date: today, amount: 0)
+                holdingDataPoints.append(finalDate)
+            }
+        }
+
+        return holdingDataPoints
+    }
+
+    func getLineGraphDataNet(type: Int) -> [LineGraphDataPoint] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date.now)
+
+        let fetchRequest = fetchRequestForLineGraph(optionalIncome: nil)
+        let transactions = visibleTransactions(results(for: fetchRequest))
+
+        var holdingDataPoints = [LineGraphDataPoint]()
+        var totalForDay = 0.0
+
+        if type < 3 {
+            let lastWeek = Calendar.current.date(byAdding: .day, value: -7, to: today)!
+            var changingDate = Calendar.current.date(byAdding: .second, value: 86399, to: lastWeek)!
+
+            for transaction in transactions {
+                if transaction.wrappedDate < changingDate {
+                    if transaction.income {
+                        totalForDay += transaction.amount
+                    } else {
+                        totalForDay -= transaction.amount
+                    }
+                } else {
+                    let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
+                    holdingDataPoints.append(newData)
+                    changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+
+                    while transaction.wrappedDate > changingDate {
+                        let anotherNewData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
+                        holdingDataPoints.append(anotherNewData)
+                        changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+                    }
+
+                    if transaction.income {
+                        totalForDay += transaction.amount
+                    } else {
+                        totalForDay -= transaction.amount
+                    }
+                }
+            }
+
+            let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
+            holdingDataPoints.append(newData)
+
+            if changingDate < today {
+                changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+
+                while changingDate < today {
+                    let anotherNewData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
+                    holdingDataPoints.append(anotherNewData)
+                    changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+                }
+
+                let finalDate = LineGraphDataPoint(date: today, amount: totalForDay)
+                holdingDataPoints.append(finalDate)
+            }
+        } else if type == 3 {
+            let lastMonth = Calendar.current.date(byAdding: .month, value: -1, to: today)!
+            var changingDate = Calendar.current.date(byAdding: .second, value: 86399, to: lastMonth)!
+
+            for transaction in transactions {
+                if transaction.wrappedDate < changingDate {
+                    if transaction.income {
+                        totalForDay += transaction.amount
+                    } else {
+                        totalForDay -= transaction.amount
+                    }
+                } else {
+                    let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
+                    holdingDataPoints.append(newData)
+                    changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+
+                    while transaction.wrappedDate > changingDate {
+                        let anotherNewData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
+                        holdingDataPoints.append(anotherNewData)
+                        changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+                    }
+
+                    if transaction.income {
+                        totalForDay += transaction.amount
+                    } else {
+                        totalForDay -= transaction.amount
+                    }
+                }
+            }
+
+            let newData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
+            holdingDataPoints.append(newData)
+
+            if changingDate < today {
+                changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+
+                while changingDate < today {
+                    let anotherNewData = LineGraphDataPoint(date: changingDate, amount: totalForDay)
+                    holdingDataPoints.append(anotherNewData)
+                    changingDate = Calendar.current.date(byAdding: .day, value: 1, to: changingDate)!
+                }
+
+                let finalDate = LineGraphDataPoint(date: today, amount: totalForDay)
+                holdingDataPoints.append(finalDate)
+            }
+        } else if type == 4 {
+            let dateComponents = calendar.dateComponents([.month, .year], from: Date.now)
+            let thisMonth = calendar.date(from: dateComponents)!
+            let nextMonth = calendar.date(byAdding: .month, value: 1, to: thisMonth)!
+            var changingDate = calendar.date(byAdding: .year, value: -1, to: nextMonth)!
+
+            for transaction in transactions {
+                if transaction.wrappedDate < changingDate {
+                    if transaction.income {
+                        totalForDay += transaction.amount
+                    } else {
+                        totalForDay -= transaction.amount
+                    }
+                } else {
+                    let dataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
+                    let newData = LineGraphDataPoint(date: dataDate, amount: totalForDay)
+                    holdingDataPoints.append(newData)
+                    changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
+
+                    while transaction.wrappedDate > changingDate {
+                        let newDataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
+                        let anotherNewData = LineGraphDataPoint(date: newDataDate, amount: totalForDay)
+                        holdingDataPoints.append(anotherNewData)
+                        changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
+                    }
+
+                    if transaction.income {
+                        totalForDay += transaction.amount
+                    } else {
+                        totalForDay -= transaction.amount
+                    }
+                }
+            }
+
+            let dataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
+            let newData = LineGraphDataPoint(date: dataDate, amount: totalForDay)
+            holdingDataPoints.append(newData)
+
+            if changingDate < nextMonth {
+                changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
+
+                while changingDate < nextMonth {
+                    let anotherDataDate = calendar.date(byAdding: .day, value: -1, to: changingDate)!
+                    let anotherNewData = LineGraphDataPoint(date: anotherDataDate, amount: totalForDay)
+                    holdingDataPoints.append(anotherNewData)
+                    changingDate = Calendar.current.date(byAdding: .month, value: 1, to: changingDate)!
+                }
+
+                let finalDate = LineGraphDataPoint(date: today, amount: totalForDay)
+                holdingDataPoints.append(finalDate)
+            }
+        }
+
+        return holdingDataPoints
+    }
+
+    func getLogViewTotalIncome(type: Int) -> Double {
+        let fetchRequest = fetchRequestForLogView(type: type, optionalIncome: true)
+        let allTransactions = visibleTransactions(results(for: fetchRequest))
+
+        var total = 0.0
+
+        allTransactions.forEach { transaction in
+            total += transaction.amount
+        }
+
+        return total
+    }
+
+    func getLogViewTotalNet(type: Int) -> (value: Double, positive: Bool) {
+        let fetchRequest = fetchRequestForLogView(type: type, optionalIncome: nil)
+        let allTransactions = visibleTransactions(results(for: fetchRequest))
+
+        var total = 0.0
+
+        allTransactions.forEach { transaction in
+            if transaction.income {
+                total += transaction.amount
+            } else {
+                total -= transaction.amount
+            }
+        }
+
+        if total >= 0 {
+            return (total, true)
+        } else {
+            return (abs(total), false)
+        }
+    }
+
+    func getLogViewTotalSpent(type: Int) -> Double {
+        let fetchRequest = fetchRequestForLogView(type: type, optionalIncome: false)
+        let allTransactions = visibleTransactions(results(for: fetchRequest))
+
+        var total = 0.0
+
+        allTransactions.forEach { transaction in
+            total += transaction.amount
+        }
+
+        return total
+    }
+
+    func getShortcutInsights(type: Int, timeframe: Int, optionalIncome: Bool?, categories: [Category]) -> Double {
+        let fetchRequest = fetchRequestForLogView(type: timeframe, optionalIncome: optionalIncome, categoryFilters: categories)
+        let allTransactions = results(for: fetchRequest)
+
+        if type == 1 {
+            var total = 0.0
+
+            allTransactions.forEach { transaction in
+                if transaction.income {
+                    total += transaction.amount
+                } else {
+                    total -= transaction.amount
+                }
+            }
+
+            return total
+        } else {
+            var total = 0.0
+
+            allTransactions.forEach { transaction in
+                total += transaction.amount
+            }
+
+            return total
+        }
+    }
+
+    func getSuggestedNotes(searchQuery: String, category: Category?, income: Bool) -> [Transaction] {
         let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
+        itemRequest.sortDescriptors = [NSSortDescriptor(keyPath: \Transaction.date, ascending: false)]
 
-        var calendar = Calendar(identifier: .gregorian)
-
-        calendar.firstWeekday = UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.integer(forKey: "firstWeekday")
-        calendar.minimumDaysInFirstWeek = 4
-
-        let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
+        let beginPredicate = NSPredicate(format: "%K BEGINSWITH[cd] %@", #keyPath(Transaction.note), searchQuery)
+        let containPredicate = NSPredicate(format: "%K CONTAINS[cd] %@", #keyPath(Transaction.note), searchQuery)
+        let compound = NSCompoundPredicate(orPredicateWithSubpredicates: [beginPredicate, containPredicate])
 
         let incomePredicate = NSPredicate(format: "income = %d", income)
 
-        let startDate: Date
-        let startPredicate: NSPredicate
+        if let unwrappedCategory = category {
+            let categoryPredicate = NSPredicate(format: "%K == %@", #keyPath(Transaction.category), unwrappedCategory)
 
-        switch type {
-        case .unknown:
-            startDate = Date.now
-            startPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
-        case .week:
-            let dateComponents = calendar.dateComponents([.weekOfYear, .yearForWeekOfYear], from: Date.now)
-
-            startDate = calendar.date(from: dateComponents)!
-
-            startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), startDate as CVarArg)
-        case .month:
-            let startOfMonth = UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.integer(forKey: "firstDayOfMonth")
-
-            startDate = getStartOfMonth(startDay: startOfMonth)
-
-            startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), startDate as CVarArg)
-        case .year:
-            let dateComponents = calendar.dateComponents([.year], from: Date.now)
-
-            startDate = calendar.date(from: dateComponents)!
-
-            startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), startDate as CVarArg)
-        }
-
-        let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate, incomePredicate])
-
-        itemRequest.predicate = andPredicate
-        itemRequest.sortDescriptors = [
-            NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
-        ]
-
-        return (itemRequest, startDate)
-    }
-
-    func fetchRequestForRecentTransactionsWithCount(type: TimePeriod, count: Int) -> NSFetchRequest<Transaction> {
-        let itemRequest: NSFetchRequest<Transaction> = Transaction.fetchRequest()
-
-        var calendar = Calendar(identifier: .gregorian)
-
-        calendar.firstWeekday = UserDefaults(suiteName: "group.com.rafaelsoh.dime")!.integer(forKey: "firstWeekday")
-        calendar.minimumDaysInFirstWeek = 4
-
-        switch type {
-        case .unknown:
-            return itemRequest
-        case .day:
-            let today = calendar.startOfDay(for: Date.now)
-
-            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), today as CVarArg)
-            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
-
-            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
+            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [compound, categoryPredicate, incomePredicate])
 
             itemRequest.predicate = andPredicate
-            itemRequest.sortDescriptors = [
-                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
-            ]
-            itemRequest.fetchLimit = count
-
-            return itemRequest
-        case .week:
-            let dateComponents = calendar.dateComponents([.weekOfYear, .yearForWeekOfYear], from: Date.now)
-
-            let thisWeek = calendar.date(from: dateComponents)!
-
-            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), thisWeek as CVarArg)
-            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
-
-            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
-
-            itemRequest.predicate = andPredicate
-            itemRequest.sortDescriptors = [
-                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
-            ]
-            itemRequest.fetchLimit = count
-
-            return itemRequest
-        case .month:
-            let dateComponents = calendar.dateComponents([.month, .year], from: Date.now)
-
-            let thisMonth = calendar.date(from: dateComponents)!
-
-            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), thisMonth as CVarArg)
-            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
-
-            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
-
-            itemRequest.predicate = andPredicate
-            itemRequest.sortDescriptors = [
-                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
-            ]
-            itemRequest.fetchLimit = count
-
-            return itemRequest
-        case .year:
-            let dateComponents = calendar.dateComponents([.year], from: Date.now)
-
-            let thisYear = calendar.date(from: dateComponents)!
-
-            let startPredicate = NSPredicate(format: "%K >= %@", #keyPath(Transaction.date), thisYear as CVarArg)
-            let endPredicate = NSPredicate(format: "%K < %@", #keyPath(Transaction.date), Date.now as CVarArg)
-
-            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [startPredicate, endPredicate])
-
-            itemRequest.predicate = andPredicate
-            itemRequest.sortDescriptors = [
-                NSSortDescriptor(keyPath: \Transaction.date, ascending: false)
-            ]
-            itemRequest.fetchLimit = count
-
-            return itemRequest
-        }
-    }
-
-    func fetchRequestForMainBudgetWidget() -> (found: Bool, totalSpent: Double, budgetAmount: Double, percentage: Double, type: Int, startDate: Date) {
-        let holding = results(for: fetchRequestForMainBudget())
-
-        if let budget = holding.first {
-            let itemRequest = fetchRequestForMainBudgetTransactions(budget: budget)
-//
-            let transactions = results(for: itemRequest)
-
-            var holdingTotal = 0.0
-            transactions.forEach { transaction in
-                holdingTotal += transaction.wrappedAmount
-            }
-
-            let percentageOfDays: Double
-
-            let calendar = Calendar.current
-
-            if budget.type == 1 {
-                let components = calendar.dateComponents([.minute], from: budget.startDate!, to: Date.now)
-                percentageOfDays = Double(components.minute!) / 1440
-            } else {
-                let components1 = calendar.dateComponents([.day], from: budget.startDate!, to: budget.endDate)
-                let numberOfDays = components1.day!
-
-                let components2 = calendar.dateComponents([.day], from: budget.startDate!, to: Date.now)
-                let numberOfDaysPast = components2.day!
-
-                percentageOfDays = Double(numberOfDaysPast) / Double(numberOfDays)
-            }
-
-            return (true, holdingTotal, budget.amount, percentageOfDays, Int(budget.type), budget.startDate!)
-
         } else {
-            return (false, 0, 0, 0, 0, Date.now)
+            let andPredicate = NSCompoundPredicate(type: .and, subpredicates: [compound, incomePredicate])
+            itemRequest.predicate = andPredicate
         }
+
+        let transactions = results(for: itemRequest)
+
+        var seen = [Transaction]()
+        let filtered = transactions.filter { entity -> Bool in
+            if seen.contains(where: { $0.wrappedNote == entity.wrappedNote }) {
+                return false
+            } else {
+                seen.append(entity)
+                return true
+            }
+        }
+
+        return filtered
+//
+//        let notes = transactions.map { $0.wrappedNote }
+//
+//        return Array(Set(notes))
+    }
+
+    func getTemplateTransaction(order: Int) -> TemplateTransaction? {
+        let itemRequest: NSFetchRequest<TemplateTransaction> = TemplateTransaction.fetchRequest()
+
+        itemRequest.predicate = NSPredicate(format: "order == %d", order)
+
+        let results = results(for: itemRequest)
+
+        if results.count > 1 {
+            let output = results.first
+
+            for i in 1 ..< results.count {
+                container.viewContext.delete(results[i])
+            }
+
+            save()
+
+            return output
+        } else {
+            return results.first
+        }
+    }
+
+    func newTemplateTransaction(order: Int) {
+        if let match = getTemplateTransaction(order: order) {
+            if let unwrappedCategory = match.category {
+                _ = newTransaction(note: match.note ?? "", category: unwrappedCategory, income: match.income, amount: match.amount, date: Date.now, repeatType: Int(match.recurringType), repeatCoefficient: Int(match.recurringCoefficient), delay: false)
+
+                addedTransaction = true
+            }
+        }
+    }
+
+    func newTransaction(note: String, category: Category?, income: Bool, amount: Double, date: Date, repeatType: Int, repeatCoefficient: Int, delay _: Bool) -> Transaction {
+        let transaction = Transaction(context: container.viewContext)
+
+        if note.trimmingCharacters(in: .whitespacesAndNewlines) == "" {
+            transaction.note = category?.wrappedName ?? ""
+        } else {
+            transaction.note = note.trimmingCharacters(in: .whitespaces)
+        }
+
+        transaction.income = income
+
+        if let unwrappedCategory = category {
+            transaction.category = unwrappedCategory
+        }
+
+        transaction.amount = amount
+        transaction.date = date
+        transaction.id = UUID()
+
+        let calendar = Calendar(identifier: .gregorian)
+
+        transaction.day = calendar.date(bySettingHour: 0, minute: 0, second: 0, of: date) ?? Date.now
+
+        let dateComponents = calendar.dateComponents([.month, .year], from: date)
+
+        transaction.month = calendar.date(from: dateComponents) ?? Date.now
+
+        if repeatType > 0 {
+            transaction.onceRecurring = true
+            transaction.recurringType = Int16(repeatType)
+            transaction.recurringCoefficient = Int16(repeatCoefficient)
+            updateRecurringTransaction(transaction: transaction)
+        }
+
+        save()
+
+        return transaction
     }
 
     func results<T: NSManagedObject>(for fetchRequest: NSFetchRequest<T>) -> [T] {
         return (try? container.viewContext.fetch(fetchRequest)) ?? []
+    }
+
+    func save() {
+        if container.viewContext.hasChanges {
+            try? container.viewContext.save()
+            WidgetCenter.shared.reloadAllTimelines()
+        }
+    }
+
+    func stopRecurringTransaction(_ transaction: Transaction) {
+#if DIME_THEIRCORE_EXPENSES
+        let reference = transaction.objectID.uriRepresentation()
+        Task { @MainActor [weak self] in self?.expenses.stopRecurrence(reference) }
+#else
+        transaction.recurringType = 0
+        save()
+#endif
+    }
+
+    func updateBudgetDates() {
+        let budgets = results(for: fetchRequestForBudgets())
+        let mainBudget = results(for: fetchRequestForMainBudget())
+
+        budgets.forEach { budget in
+            while budget.endDate <= Date.now {
+                budget.startDate = budget.endDate
+            }
+        }
+
+        mainBudget.forEach { budget in
+            while budget.endDate <= Date.now {
+                budget.startDate = budget.endDate
+            }
+        }
+
+        save()
+    }
+
+    func updateRecurringTransaction(transaction: Transaction) {
+#if DIME_THEIRCORE_EXPENSES
+        // Legacy creators save synchronously before this actor turn starts.
+        Task { @MainActor [weak self] in self?.expenses.catchUpRecurrences() }
+#else
+        if transaction.nextTransactionDate < Calendar.current.startOfDay(for: Date.now) {
+            var holdingDate = transaction.nextTransactionDate
+
+            while holdingDate <= Calendar.current.startOfDay(for: Date.now) {
+                let newTransaction = Transaction(context: container.viewContext)
+                newTransaction.note = transaction.wrappedNote
+                newTransaction.category = transaction.category
+                newTransaction.amount = transaction.wrappedAmount
+                newTransaction.date = holdingDate
+                newTransaction.id = UUID()
+                newTransaction.income = transaction.income
+                newTransaction.day = holdingDate
+
+                let calendar = Calendar(identifier: .gregorian)
+
+                let dateComponents = calendar.dateComponents([.month, .year], from: holdingDate)
+
+                newTransaction.month = calendar.date(from: dateComponents)!
+
+                newTransaction.onceRecurring = true
+
+                var newDate: Date?
+
+                if transaction.recurringType == 1 {
+                    newDate = Calendar.current.date(byAdding: .day, value: Int(transaction.recurringCoefficient), to: holdingDate)!
+                } else if transaction.recurringType == 2 {
+                    newDate = Calendar.current.date(byAdding: .day, value: Int(transaction.recurringCoefficient * 7), to: holdingDate)!
+                } else if transaction.recurringType == 3 {
+                    newDate = Calendar.current.date(byAdding: .month, value: Int(transaction.recurringCoefficient), to: holdingDate)!
+                }
+
+                if newDate! > Calendar.current.startOfDay(for: Date.now) {
+                    newTransaction.recurringType = transaction.recurringType
+                    newTransaction.recurringCoefficient = transaction.recurringCoefficient
+                } else {
+                    newTransaction.recurringType = 0
+                }
+
+                holdingDate = newDate!
+            }
+
+            transaction.recurringType = 0
+
+            save()
+
+        } else if Calendar.current.isDateInToday(transaction.nextTransactionDate) {
+            let newTransaction = Transaction(context: container.viewContext)
+            newTransaction.note = transaction.wrappedNote
+            newTransaction.category = transaction.category
+            newTransaction.amount = transaction.wrappedAmount
+            newTransaction.date = transaction.nextTransactionDate
+            newTransaction.id = UUID()
+            newTransaction.income = transaction.income
+            newTransaction.day = transaction.nextTransactionDate
+
+            let calendar = Calendar(identifier: .gregorian)
+
+            let dateComponents = calendar.dateComponents([.month, .year], from: transaction.nextTransactionDate)
+
+            newTransaction.month = calendar.date(from: dateComponents)!
+
+            newTransaction.onceRecurring = true
+            newTransaction.recurringType = transaction.recurringType
+            newTransaction.recurringCoefficient = transaction.recurringCoefficient
+
+            transaction.recurringType = 0
+
+            save()
+        }
+#endif
+    }
+
+    func updateRecurringTransactions() {
+#if DIME_THEIRCORE_EXPENSES
+        Task { @MainActor [weak self] in self?.expenses.catchUpRecurrences() }
+#else
+        let recurringTransactions = results(for: fetchRequestForRecurringTransactions())
+
+        recurringTransactions.forEach { transaction in
+            updateRecurringTransaction(transaction: transaction)
+        }
+#endif
+    }
+
+    /// Bridge retained CoreData rendering to the app owner's pending-deletion projection.
+    func visibleTransactions<S: Sequence>(_ transactions: S) -> [Transaction] where S.Element == Transaction {
+#if DIME_THEIRCORE_EXPENSES
+        return transactions.filter { !expenseState.deletion.references.contains($0.objectID.uriRepresentation()) }
+#else
+        return Array(transactions)
+#endif
     }
 }
 
@@ -1747,8 +1770,17 @@ public extension NSManagedObjectContext {
 }
 
 struct LineGraphDataPoint: Equatable {
-    let date: Date
     let amount: Double
+
+    var amountString: String {
+        if abs(amount) < 1000 {
+            return String(format: "%.2f", amount)
+        } else {
+            return String(format: "%.0f", amount)
+        }
+    }
+
+    let date: Date
 
     var dateString: String {
         let dateFormatter = DateFormatter()
@@ -1765,13 +1797,9 @@ struct LineGraphDataPoint: Equatable {
 
         return dateFormatter.string(from: date)
     }
-
-    var amountString: String {
-        if abs(amount) < 1000 {
-            return String(format: "%.2f", amount)
-        } else {
-            return String(format: "%.0f", amount)
-        }
+    init(date: Date, amount: Double) {
+        self.date = date
+        self.amount = amount
     }
 }
 

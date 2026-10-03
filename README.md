@@ -1,6 +1,6 @@
 # Dime
 
-> **TheirCore migration fork:** the expense editor, live budgets and undoable list deletion use [TheirCore 0.3.0](https://github.com/Stealth-O/TheirCore/tree/0.3.0). Expense state and named Job bindings use `Their.Desk` with typed events and one fixed reducer per Desk. The original UI, CoreData schema and GPL-3.0 license are retained. The shared debug scheme runs with an isolated local store. See [migration notes, checks and remaining boundaries](docs/theircore-migration.md).
+> **TheirCore migration fork:** the expense editor, live budgets, undoable list deletion and main-app recurrence catch-up/stop use [TheirCore 0.3.0](https://github.com/Stealth-O/TheirCore/tree/0.3.0). Expense state and named Job bindings use `Their.Desk` with typed events and one fixed reducer per Desk. The original UI, CoreData schema and GPL-3.0 license are retained. The shared debug scheme runs with an isolated local store. See [migration notes, checks and remaining boundaries](docs/theircore-migration.md).
 
 
 <p align="center">
