@@ -14,16 +14,21 @@ import UniformTypeIdentifiers
 struct ColumnLabel {
     let image: String
     let label: String
-}
-
-enum ProcessingState {
-    case loading, success, error
+    init(image: String, label: String) {
+        self.image = image
+        self.label = label
+    }
 }
 
 struct MatchedCategory: Hashable {
+    var category: Category?
     let excelValue: String
     var income: Bool
-    var category: Category?
+    init(excelValue: String, income: Bool, category: Category? = nil) {
+        self.excelValue = excelValue
+        self.income = income
+        self.category = category
+    }
 
     mutating func toggleIncome() {
         income = !income
@@ -38,119 +43,32 @@ extension Sequence where Iterator.Element: Hashable {
 }
 
 struct ImportDataView: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var dataController: DataController
-
-    @State private var exportSample = false
-    @State private var importing = false
-
-    @State private var data = ""
-    @State private var rows = [[String]]()
-    @State private var numberOfRows: Int = 0
-    @State private var displayedColumns = [[String]]()
-    @State private var columns = [[String]]()
-
-    @State private var remainingColumns = [Int]()
-    @State private var selectedColumns = [Int]()
-
-    var indexColumnWidth: CGFloat {
-        let additionalPadding: Double
-
-        if dynamicTypeSize > .xLarge {
-            additionalPadding = 10
-        } else {
-            additionalPadding = 0
-        }
-
-        if numberOfRows < 10 {
-            return "9".widthOfRoundedString(size: 15, weight: .bold) + 16.0 + additionalPadding
-        } else if numberOfRows < 100 {
-            return "99".widthOfRoundedString(size: 15, weight: .bold) + 16.0 + additionalPadding
-        } else {
-            return "999".widthOfRoundedString(size: 15, weight: .bold) + 16.0 + additionalPadding
-        }
-    }
-
-    @State var progress = 1
-
-    @State var selectedColumn = 0
-    @State var columnSelectionCompleted = false
-    @State var sampleDateString = ""
-    @State var dateFormatString = ""
-    @State var validDateFormatString = false
-    @State var uniqueCategories: [MatchedCategory] = .init()
-
-    @State var processingState = ProcessingState.loading
-    @State var errorMessage = "Invalid dates in date column."
-    @State var confettiNumber = 0
-
-    var numberOfLinkedCategories: Int {
-        uniqueCategories.filter { $0.category != nil }.count
-    }
-
-    @State var showToast = false
-    @State var toastMessage: String = "Invalid File"
-
-    @State var showingCategoryView = false
-    @State var pageIndex = 0
-
-    // just for the adding of transactions
-    @State var income = false
-
-    @Environment(\.dynamicTypeSize) var dynamicTypeSize
-
-    var columnWidth: CGFloat {
-        if dynamicTypeSize > .xLarge {
-            return 150
-        } else {
-            return 100
-        }
-    }
-
-    let instructions: [InstructionHeadings] = [
-        InstructionHeadings(title: "Import transactions", subtitle: "Begin by adding a CSV file with 4 columns: amount, note, date, and category."),
-        InstructionHeadings(title: "Assign category column", subtitle: "Select a column from your import that corresponds to the categories of your transactions."),
-        InstructionHeadings(title: "Assign note column", subtitle: "Select a column from your import that corresponds to the notes/subtitles of your transactions."),
-        InstructionHeadings(title: "Assign date column", subtitle: "Select a column from your import that corresponds to the dates of your transactions."),
-        InstructionHeadings(title: "Assign amount column", subtitle: "Select a column from your import that corresponds to the values of your transactions."),
-        InstructionHeadings(title: "Indicate date format", subtitle: "Referencing this article, state the format of the dates in the assigned column."),
-        InstructionHeadings(title: "Link categories", subtitle: "Match values found in the 'Category' column to the corresponding categories in Dime."),
-        InstructionHeadings(title: "Processing import", subtitle: "Please wait while we process your new transactions.")
-    ]
-
-    let labels: [ColumnLabel] = [
-        ColumnLabel(image: "square.grid.2x2.fill", label: "Category"),
-        ColumnLabel(image: "doc.plaintext.fill", label: "Note"),
-        ColumnLabel(image: "calendar", label: "Date"),
-        ColumnLabel(image: "dollarsign.circle.fill", label: "Amount")
-    ]
-
-    let pointers = ["Ensure that the values in the 'Amount' column do not contain any currency symbols.", "All dates should be of a consistent, recognizable format. If no timestamps are provided, the time of transaction will default to 12:00 am.", "Remove all commas in the 'Note' and 'Category' columns as they would disrupt the parsing of your file."]
-
-    var incomeCategories: [Category] {
-        dataController.getAllCategories(income: true)
-    }
-
-    var expenseCategories: [Category] {
-        dataController.getAllCategories(income: false)
-    }
 
     var body: some View {
         VStack(spacing: 0) {
             if progress == 8 {
                 VStack(spacing: 15) {
-                    switch processingState {
-                    case .loading:
-                        ProgressView()
+                    switch importState.status {
+                    case .idle, .running, .cancelling:
+                        ProgressView(value: Double(importState.preparedRows), total: Double(max(1, importState.totalRows)))
                             .controlSize(.large)
                             .scaleEffect(0.8)
 
-                        Text("Processing Import")
+                        Text(importState.status == .cancelling ? "Cancelling Import" : importState.phase == .saving ? "Saving Import" : "Processing Import")
                             .font(.system(.title2, design: .rounded).weight(.medium))
 
 //                            .font(.system(size: 22, weight: .medium, design: .rounded))
                             .foregroundColor(Color.SubtitleText)
-                    case .success:
+
+                        Text("\(importState.preparedRows) / \(importState.totalRows) rows prepared")
+                            .font(.system(.subheadline, design: .rounded))
+                            .foregroundColor(Color.SubtitleText)
+
+                        Button("Cancel Import") {
+                            Task { @MainActor in dataController.expenses.cancelImport() }
+                        }
+                        .disabled(!importState.canCancel)
+                    case .succeeded:
 
                         Image(systemName: "checkmark")
                             .font(.system(.title2, design: .rounded).weight(.semibold))
@@ -165,7 +83,13 @@ struct ImportDataView: View {
 
 //                            .font(.system(size: 22, weight: .medium, design: .rounded))
                             .foregroundColor(Color.IncomeGreen)
-                    case .error:
+                    case .cancelled:
+                        Text("Import Cancelled")
+                            .font(.system(.title2, design: .rounded).weight(.medium))
+                        Text("Nothing was saved.")
+                            .foregroundColor(Color.SubtitleText)
+                        importRecoveryButtons
+                    case .failed(let failure):
                         Image(systemName: "x")
                             .font(.system(.title2, design: .rounded).weight(.semibold))
 
@@ -180,11 +104,12 @@ struct ImportDataView: View {
 //                            .font(.system(size: 22, weight: .medium, design: .rounded))
                             .foregroundColor(Color.PrimaryText)
 
-                        Text(errorMessage)
+                        Text(failure.localizedDescription)
                             .font(.system(.subheadline, design: .rounded).weight(.medium))
 
 //                            .font(.system(size: 15, weight: .medium, design: .rounded))
                             .foregroundColor(Color.SubtitleText)
+                        importRecoveryButtons
                     }
                 }
                 .frame(maxHeight: .infinity)
@@ -773,7 +698,7 @@ struct ImportDataView: View {
             allowedContentTypes: [.commaSeparatedText]
         ) { result in
             switch result {
-            case let .success(file):
+            case .success(let file):
                 do {
                     if file.startAccessingSecurityScopedResource() {
                         guard let message = try String(data: Data(contentsOf: file), encoding: .utf8) else {
@@ -791,7 +716,7 @@ struct ImportDataView: View {
                         }
                     }
                 } catch {}
-            case let .failure(error):
+            case .failure(let error):
                 print(error.localizedDescription)
             }
         }
@@ -816,123 +741,127 @@ struct ImportDataView: View {
                 }
             }
         }
-        .onChange(of: processingState) { newValue in
-            if newValue == .success {
+        .onChange(of: importState.status) { newValue in
+            if case .succeeded = newValue {
+                confettiNumber += 1
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                     dismiss()
                 }
             }
         }
+        .onDisappear {
+            Task { @MainActor in dataController.expenses.cancelImport() }
+        }
         .confettiCannon(counter: $confettiNumber, num: 50, openingAngle: Angle(degrees: 0), closingAngle: Angle(degrees: 360), radius: 200)
     }
+    @State private var columns = [[String]]()
+    @State var columnSelectionCompleted = false
 
-    func validateDoubles(strings: [String]) -> Bool {
-        for string in strings {
-            if let _ = Double(string) {
-                // Valid double
-            } else {
-                return false // Invalid double found
-            }
-        }
-        return true // All strings are valid doubles
-    }
-
-    func processCSV() {
-        guard data.containsDigits else {
-            showToast = true
-            toastMessage = "Invalid File"
-            return
-        }
-
-        var holdingRows = data.components(separatedBy: .newlines).filter { $0 != "" }
-
-        if !holdingRows[0].containsDigits {
-            holdingRows.removeFirst()
-        }
-
-        guard !holdingRows.isEmpty else {
-            showToast = true
-            toastMessage = "Invalid File"
-            return
-        }
-
-        let values = holdingRows.map { $0.components(separatedBy: ",") }.filter { !$0.isEmpty }
-
-        rows = values
-
-        // Transpose rows to columns
-        let maxColumnCount = values.map { $0.count }.max() ?? 0
-//
-        guard maxColumnCount > 3 else {
-            showToast = true
-            toastMessage = "Invalid File"
-            return
-        }
-
-        var holdingColumns: [[String]] = Array(repeating: [], count: maxColumnCount)
-
-        for row in values {
-            for (index, value) in row.enumerated() {
-                holdingColumns[index].append(value)
-            }
-        }
-
-        columns = holdingColumns
-
-        displayedColumns = holdingColumns.map { $0.prefix(8).map { $0 } }
-
-        numberOfRows = displayedColumns[0].count
-
-        remainingColumns = Array(0 ..< maxColumnCount)
-
-        withAnimation {
-            progress += 1
+    var columnWidth: CGFloat {
+        if dynamicTypeSize > .xLarge {
+            return 150
+        } else {
+            return 100
         }
     }
 
-    func importData() {
-        let categoryColumnIndex = selectedColumns[0]
-        let noteColumnIndex = selectedColumns[1]
-        let dateColumnIndex = selectedColumns[2]
-        let amountColumnIndex = selectedColumns[3]
+    @State var confettiNumber = 0
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = dateFormatString
+    @State private var data = ""
+    @EnvironmentObject var dataController: DataController
+    @State var dateFormatString = ""
+    @Environment(\.dismiss) var dismiss
+    @State private var displayedColumns = [[String]]()
 
-        let categoryDictionary: [String: Category] = Dictionary(uniqueKeysWithValues: uniqueCategories.map { ($0.excelValue, $0.category!) })
+    @Environment(\.dynamicTypeSize) var dynamicTypeSize
 
-        rows.forEach { row in
-//            let rowCategory = categoryDictionary[row[categoryColumnIndex]]
-            if let transactionDate = dateFormatter.date(from: row[dateColumnIndex]) {
-                if let rowCategory = categoryDictionary[row[categoryColumnIndex]] {
-                    if let transactionAmount = Double(row[amountColumnIndex]) {
-                        _ = dataController.newTransaction(note: row[noteColumnIndex], category: rowCategory, income: rowCategory.income, amount: abs(transactionAmount), date: transactionDate, repeatType: 0, repeatCoefficient: 1, delay: false)
-                    } else {
-                        processingState = .error
-                        errorMessage = "Invalid values in amount column."
-                        return
-                    }
-                } else {
-                    processingState = .error
-                    errorMessage = "Error occurred while matching categories."
-                    return
-                }
-            } else {
-                processingState = .error
-                errorMessage = "Invalid dates in date column."
-                return
+    var expenseCategories: [Category] {
+        dataController.getAllCategories(income: false)
+    }
+
+    @State private var exportSample = false
+    @State private var importing = false
+
+    var importRecoveryButtons: some View {
+        HStack(spacing: 20) {
+            Button("Try Again") {
+                Task { @MainActor in dataController.expenses.retryImport() }
             }
-        }
-
-        dataController.save()
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            withAnimation {
-                processingState = .success
-                confettiNumber += 1
+            Button("Review Import") {
+                Task { @MainActor in dataController.expenses.clearImport() }
+                progress = 7
             }
         }
     }
+
+    var importState: ExpenseImportState { dataController.expenseState.importState }
+
+    // just for the adding of transactions
+    @State var income = false
+
+    var incomeCategories: [Category] {
+        dataController.getAllCategories(income: true)
+    }
+
+    var indexColumnWidth: CGFloat {
+        let additionalPadding: Double
+
+        if dynamicTypeSize > .xLarge {
+            additionalPadding = 10
+        } else {
+            additionalPadding = 0
+        }
+
+        if numberOfRows < 10 {
+            return "9".widthOfRoundedString(size: 15, weight: .bold) + 16.0 + additionalPadding
+        } else if numberOfRows < 100 {
+            return "99".widthOfRoundedString(size: 15, weight: .bold) + 16.0 + additionalPadding
+        } else {
+            return "999".widthOfRoundedString(size: 15, weight: .bold) + 16.0 + additionalPadding
+        }
+    }
+
+    let instructions: [InstructionHeadings] = [
+        InstructionHeadings(title: "Import transactions", subtitle: "Begin by adding a CSV file with 4 columns: amount, note, date, and category."),
+        InstructionHeadings(title: "Assign category column", subtitle: "Select a column from your import that corresponds to the categories of your transactions."),
+        InstructionHeadings(title: "Assign note column", subtitle: "Select a column from your import that corresponds to the notes/subtitles of your transactions."),
+        InstructionHeadings(title: "Assign date column", subtitle: "Select a column from your import that corresponds to the dates of your transactions."),
+        InstructionHeadings(title: "Assign amount column", subtitle: "Select a column from your import that corresponds to the values of your transactions."),
+        InstructionHeadings(title: "Indicate date format", subtitle: "Referencing this article, state the format of the dates in the assigned column."),
+        InstructionHeadings(title: "Link categories", subtitle: "Match values found in the 'Category' column to the corresponding categories in Dime."),
+        InstructionHeadings(title: "Processing import", subtitle: "Please wait while we process your new transactions.")
+    ]
+
+    let labels: [ColumnLabel] = [
+        ColumnLabel(image: "square.grid.2x2.fill", label: "Category"),
+        ColumnLabel(image: "doc.plaintext.fill", label: "Note"),
+        ColumnLabel(image: "calendar", label: "Date"),
+        ColumnLabel(image: "dollarsign.circle.fill", label: "Amount")
+    ]
+
+    var numberOfLinkedCategories: Int {
+        uniqueCategories.filter { $0.category != nil }.count
+    }
+    @State private var numberOfRows: Int = 0
+    @State var pageIndex = 0
+
+    let pointers = ["Ensure that the values in the 'Amount' column do not contain any currency symbols.", "All dates should be of a consistent, recognizable format. If no timestamps are provided, the time of transaction will default to 12:00 am.", "Remove all commas in the 'Note' and 'Category' columns as they would disrupt the parsing of your file."]
+
+    @State var progress = 1
+
+    @State private var remainingColumns = [Int]()
+    @State private var rows = [[String]]()
+    @State var sampleDateString = ""
+
+    @State var selectedColumn = 0
+    @State private var selectedColumns = [Int]()
+
+    @State var showingCategoryView = false
+
+    @State var showToast = false
+    @State var toastMessage: String = "Invalid File"
+    @State var uniqueCategories: [MatchedCategory] = .init()
+    @State var validDateFormatString = false
 
     func deduceDateFormat(from dateString: String) -> String? {
         let dateFormats = ["yyyy-MM-dd", "dd-MM-yyyy", "MM-dd-yyyy",
@@ -950,6 +879,27 @@ struct ImportDataView: View {
         }
 
         return nil
+    }
+
+    func importData() {
+        guard selectedColumns.count == 4 else {
+            showToast = true
+            toastMessage = "Choose four columns"
+            progress = 7
+            return
+        }
+        var categories: [String: ExpenseImportCategory] = [:]
+        for match in uniqueCategories {
+            if let category = match.category {
+                categories[match.excelValue] = ExpenseImportCategory(income: category.income,
+                    reference: category.objectID.uriRepresentation())
+            }
+        }
+        let request = ExpenseImportRequest(categories: categories,
+            columns: ExpenseImportColumns(category: selectedColumns[0], note: selectedColumns[1],
+                date: selectedColumns[2], amount: selectedColumns[3]),
+            dateFormat: dateFormatString, rows: rows)
+        Task { @MainActor in dataController.expenses.startImport(request) }
     }
 
     func makeAttributedString() -> AttributedString {
@@ -985,11 +935,85 @@ struct ImportDataView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
+
+    func processCSV() {
+        guard data.containsDigits else {
+            showToast = true
+            toastMessage = "Invalid File"
+            return
+        }
+
+        var holdingRows = data.components(separatedBy: .newlines).filter { $0 != "" }
+
+        if !holdingRows[0].containsDigits {
+            holdingRows.removeFirst()
+        }
+
+        guard !holdingRows.isEmpty else {
+            showToast = true
+            toastMessage = "Invalid File"
+            return
+        }
+
+        let values = holdingRows.map { $0.components(separatedBy: ",") }.filter { !$0.isEmpty }
+
+        rows = values
+
+        // Transpose rows to columns
+        let maxColumnCount = values.map { $0.count }.max() ?? 0
+//
+        guard values.allSatisfy({ $0.count == maxColumnCount }) else {
+            showToast = true
+            toastMessage = "Every row must have the same number of columns"
+            return
+        }
+
+        guard maxColumnCount > 3 else {
+            showToast = true
+            toastMessage = "Invalid File"
+            return
+        }
+
+        var holdingColumns: [[String]] = Array(repeating: [], count: maxColumnCount)
+
+        for row in values {
+            for (index, value) in row.enumerated() {
+                holdingColumns[index].append(value)
+            }
+        }
+
+        columns = holdingColumns
+
+        displayedColumns = holdingColumns.map { $0.prefix(8).map { $0 } }
+
+        numberOfRows = displayedColumns[0].count
+
+        remainingColumns = Array(0 ..< maxColumnCount)
+
+        withAnimation {
+            progress += 1
+        }
+    }
+
+    func validateDoubles(strings: [String]) -> Bool {
+        for string in strings {
+            if let _ = Double(string) {
+                // Valid double
+            } else {
+                return false // Invalid double found
+            }
+        }
+        return true // All strings are valid doubles
+    }
 }
 
 struct ActivityViewController: UIViewControllerRepresentable {
     var activityItems: [Any]
     var applicationActivities: [UIActivity]?
+    init(activityItems: [Any], applicationActivities: [UIActivity]? = nil) {
+        self.activityItems = activityItems
+        self.applicationActivities = applicationActivities
+    }
 
     func makeUIViewController(context _: UIViewControllerRepresentableContext<ActivityViewController>) -> UIActivityViewController {
         let controller = UIActivityViewController(activityItems: activityItems, applicationActivities: applicationActivities)
@@ -1000,10 +1024,6 @@ struct ActivityViewController: UIViewControllerRepresentable {
 }
 
 struct MatchCategoryStepperView: View {
-    @Binding var category: Category?
-    @Binding var pageIndex: Int
-    var categories: [Category]
-    var maxIndex: Int
 //
 //    @Environment(\.dynamicTypeSize) var dynamicTypeSize
 //
@@ -1075,6 +1095,17 @@ struct MatchCategoryStepperView: View {
                 .stroke(Color.Outline, lineWidth: 2)
         }
 //        .background(Color.PrimaryBackground, in: )
+    }
+    var categories: [Category]
+    @Binding var category: Category?
+    var maxIndex: Int
+    @Binding var pageIndex: Int
+
+    init(category: Binding<Category?>?, categories: [Category], pageIndex: Binding<Int>, maxIndex: Int) {
+        _category = category ?? Binding.constant(nil)
+        _pageIndex = pageIndex
+        self.categories = categories
+        self.maxIndex = maxIndex
     }
 
     func getRows() -> [[Category]] {
@@ -1159,18 +1190,15 @@ struct MatchCategoryStepperView: View {
         }
         .buttonStyle(BouncyButton(duration: 0.2, scale: 0.8))
     }
-
-    init(category: Binding<Category?>?, categories: [Category], pageIndex: Binding<Int>, maxIndex: Int) {
-        _category = category ?? Binding.constant(nil)
-        _pageIndex = pageIndex
-        self.categories = categories
-        self.maxIndex = maxIndex
-    }
 }
 
 struct RoundedCorner: Shape {
-    var radius: CGFloat = .infinity
     var corners: UIRectCorner = .allCorners
+    var radius: CGFloat = .infinity
+    init(radius: CGFloat = .infinity, corners: UIRectCorner = .allCorners) {
+        self.radius = radius
+        self.corners = corners
+    }
 
     func path(in rect: CGRect) -> Path {
         let path = UIBezierPath(roundedRect: rect, byRoundingCorners: corners, cornerRadii: CGSize(width: radius, height: radius))

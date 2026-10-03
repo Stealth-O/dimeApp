@@ -800,6 +800,11 @@ private final class RecurrenceRepository: ExpenseRepository {
         records.removeAll { references.contains($0.reference) }
     }
 
+    func importExpenses(_ request: ExpenseImportRequest, control: ExpenseImportControl,
+                        progress: @escaping @Sendable (ExpenseImportProgress) -> Void) async throws -> [Expense] {
+        throw ExpenseImportFailure.persistence("Unused import")
+    }
+
     func load() throws -> [Expense] {
         if failLoad { throw ExpenseFailure.persistence("Read unavailable") }
         return records.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }

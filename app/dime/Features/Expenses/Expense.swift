@@ -49,6 +49,7 @@ struct ExpenseState: Equatable, Sendable {
     var deletion = ExpenseDeletionState()
     var expenses: [Expense] = []
     var failure: ExpenseFailure?
+    var importState = ExpenseImportState()
     var recurrence = ExpenseRecurrenceState()
 }
 
@@ -122,6 +123,7 @@ enum ExpenseCommand: Sendable {
 
 enum ExpenseMutation: Equatable, Sendable {
     case deleted(URL)
+    case imported([Expense])
     case recurrencesAdvanced(ExpenseRecurrenceCommit)
     case recurrenceStopped(Expense)
     case saved(Expense)

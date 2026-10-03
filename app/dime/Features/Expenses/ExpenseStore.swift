@@ -5,6 +5,8 @@ import TheirCore
 protocol ExpenseRepository: AnyObject {
     func catchUpRecurrences(excluding references: Set<URL>) throws -> ExpenseRecurrenceCommit
     func delete(_ references: [URL]) throws
+    func importExpenses(_ request: ExpenseImportRequest, control: ExpenseImportControl,
+                        progress: @escaping @Sendable (ExpenseImportProgress) -> Void) async throws -> [Expense]
     func load() throws -> [Expense]
     func save(_ draft: ExpenseDraft, editing: URL?) throws -> Expense
     func stopRecurrence(_ reference: URL) throws -> Expense
@@ -17,6 +19,9 @@ final class ExpenseStore {
     // Domain fence before irreversible IO, including reentrant Undo during publish.
     private var deletionGeneration = 0
     private let desk: Their.Desk<ExpenseDeskState, ExpenseEvent>
+#if DEBUG
+    var importTaskFinishedForTests: @Sendable () -> Void = {}
+#endif
 #if DEBUG
     /// Deterministic seam before irreversible recurrence IO, absent from release builds.
     var recurrencePreparationForTests: @Sendable () async throws -> Void = {}
@@ -79,6 +84,13 @@ final class ExpenseStore {
         return true
     }
 
+    /// Retain the token until the worker acknowledges cancellation or a claimed save.
+    func cancelImport() {
+        // Also cancel a start queued by a reentrant observer and not yet reduced.
+        desk.unbind("import")
+        desk.send(.importCancellationRequested)
+    }
+
     /// Cancels owned work; committed rows and persisted recurrence settings survive.
     func cancelRecurrences() {
         for (operation, token) in desk.current.recurrenceOperations {
@@ -97,6 +109,11 @@ final class ExpenseStore {
 
     func clearDeletionFailure() {
         desk.send(.deletionFailureCleared)
+    }
+
+    func clearImport() {
+        guard !state.importState.isRunning else { return }
+        desk.send(.importCleared)
     }
 
     func clearRecurrenceFailure() {
@@ -183,6 +200,38 @@ final class ExpenseStore {
         case .deletionUndone(let refresh):
             model.snapshot.deletion = ExpenseDeletionState()
             model.refresh(refresh)
+        case .importCancellationRequested:
+            guard model.importToken != nil else { return }
+            model.snapshot.importState.status = .cancelling
+        case .importCleared:
+            guard model.importToken == nil else { return }
+            model.importRequest = nil
+            model.snapshot.importState = ExpenseImportState()
+        case .importFinished(let token, let result, let refresh):
+            // Committed facts survive cancellation, detachment and failed refreshes.
+            if case .success(let expenses) = result {
+                model.apply(.imported(expenses))
+                if let refresh { model.refresh(refresh) }
+            }
+            if model.importToken == token {
+                model.importToken = nil
+                switch result {
+                case .failure(.cancelled): model.snapshot.importState.status = .cancelled
+                case .failure(let failure): model.snapshot.importState.status = .failed(failure)
+                case .success(let expenses):
+                    model.importRequest = nil
+                    model.snapshot.importState.preparedRows = expenses.count
+                    model.snapshot.importState.status = .succeeded(expenses.count)
+                }
+            }
+        case .importProgressed(let token, let progress):
+            guard model.importToken == token, model.snapshot.importState.status == .running else { return }
+            model.snapshot.importState.preparedRows = max(model.snapshot.importState.preparedRows, progress.preparedRows)
+            if progress.phase == .saving { model.snapshot.importState.phase = .saving }
+        case .importStarted(let token, let request):
+            model.importRequest = request
+            model.importToken = token
+            model.snapshot.importState = ExpenseImportState(status: .running, totalRows: request.rows.count)
         case .mutationCommitted(let mutation, let refresh):
             model.apply(mutation)
             model.refresh(refresh)
@@ -214,9 +263,70 @@ final class ExpenseStore {
         desk.send(.refreshed(readExpenses()))
     }
 
+    func retryImport() {
+        guard state.importState.canRetry, let request = desk.current.importRequest else { return }
+        startImport(request)
+    }
+
     func retryRecurrence() {
         guard let operation = state.recurrence.failedOperation else { return }
         startRecurrence(operation)
+    }
+
+    /// One app-owned Job emits preparation progress; the fixed reducer owns all status.
+    @discardableResult
+    func startImport(_ request: ExpenseImportRequest) -> Bool {
+        guard !state.importState.isRunning else { return false }
+        let token = UUID()
+        let repository = repository
+#if DEBUG
+        let finished = importTaskFinishedForTests
+#endif
+        desk.send(.importStarted(token, request))
+        let job = Their.Job<ExpenseImportOutput, ExpenseImportFailure> { [weak self] report in
+            let control = ExpenseImportControl()
+            let task = Task { @MainActor [weak self] in
+#if DEBUG
+                defer { finished() }
+#endif
+                guard self?.desk.current.importToken == token else {
+                    report(.finished)
+                    return
+                }
+                let result: Result<[Expense], ExpenseImportFailure>
+                do {
+                    try Task.checkCancellation()
+                    guard self?.state.importState.status == .running else { throw CancellationError() }
+                    let expenses = try await repository.importExpenses(request, control: control) { progress in
+                        // CoreData runs on its private queue; delivery stays on the owner's actor.
+                        Task { @MainActor in report(.value(.progress(progress))) }
+                    }
+                    result = .success(expenses)
+                } catch {
+                    result = .failure(ExpenseImportFailure(error))
+                }
+                // Do not retain the owner across the database await. Domain facts must be
+                // published even when unbinding suppressed this Job's remaining reports.
+                if let self {
+                    let refresh: Result<[Expense], ExpenseFailure>?
+                    if case .success = result { refresh = self.readExpenses() }
+                    else { refresh = nil }
+                    self.desk.send(.importFinished(token, result, refresh: refresh))
+                }
+                switch result {
+                case .failure(let failure): report(.failure(failure))
+                case .success(let expenses):
+                    report(.value(.committed(expenses.count)))
+                    report(.finished)
+                }
+            }
+            return { control.cancel(); task.cancel() }
+        }
+        desk.bind(job, id: "import") { event in
+            if case .value(.progress(let progress)) = event { return .importProgressed(token, progress) }
+            return nil
+        }
+        return true
     }
 
     @discardableResult
@@ -284,6 +394,8 @@ final class ExpenseStore {
 
 /// Cached database facts and their transient projection form one value snapshot.
 private struct ExpenseDeskState: Sendable {
+    var importRequest: ExpenseImportRequest?
+    var importToken: UUID?
     var loadedExpenses: [Expense] = []
     var recurrenceOperations: [ExpenseRecurrenceOperation: UUID] = [:]
     var snapshot = ExpenseState()
@@ -294,6 +406,8 @@ private struct ExpenseDeskState: Sendable {
         switch mutation {
         case .deleted(let reference):
             loadedExpenses.removeAll { $0.reference == reference }
+        case .imported(let expenses):
+            replace(expenses)
         case .recurrencesAdvanced(let commit):
             replace(commit.expenses)
             successors.merge(commit.successors) { _, current in current }
@@ -346,6 +460,11 @@ private enum ExpenseEvent: Sendable {
     case deletionFinished(refresh: Result<[Expense], ExpenseFailure>, failure: ExpenseFailure?)
     case deletionRequested(URL)
     case deletionUndone(Result<[Expense], ExpenseFailure>)
+    case importCancellationRequested
+    case importCleared
+    case importFinished(UUID, Result<[Expense], ExpenseImportFailure>, refresh: Result<[Expense], ExpenseFailure>?)
+    case importProgressed(UUID, ExpenseImportProgress)
+    case importStarted(UUID, ExpenseImportRequest)
     case mutationCommitted(ExpenseMutation, refresh: Result<[Expense], ExpenseFailure>)
     case recurrenceEnded(ExpenseRecurrenceOperation, UUID, failure: ExpenseFailure?)
     case recurrenceFailureCleared

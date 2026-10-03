@@ -6,6 +6,10 @@ import TheirCore
 final class CoreDataExpenseRepository: ExpenseRepository {
     private let calendar: @Sendable () -> Calendar
     private let didCommit: () -> Void
+#if DEBUG
+    /// Synchronous private-queue seam to exercise cancellation immediately before save.
+    var importBeforeCommitForTests: @Sendable () throws -> Void = {}
+#endif
     private let now: @Sendable () -> Date
     private let viewContext: NSManagedObjectContext
     private let writer: NSManagedObjectContext
@@ -123,6 +127,100 @@ final class CoreDataExpenseRepository: ExpenseRepository {
         return head
     }
 
+    /// Stage on a private queue and commit the entire file once. The legacy context
+    /// never owns tentative imported rows or saves unrelated edits on their behalf.
+    func importExpenses(_ request: ExpenseImportRequest, control: ExpenseImportControl,
+                        progress: @escaping @Sendable (ExpenseImportProgress) -> Void) async throws -> [Expense] {
+        let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
+        context.persistentStoreCoordinator = viewContext.persistentStoreCoordinator
+        let currentCalendar = calendar()
+#if DEBUG
+        let beforeCommit = importBeforeCommitForTests
+#endif
+        return try await withTaskCancellationHandler {
+            let expenses = try await context.perform(schedule: .enqueued) {
+                defer { context.reset() }
+                try control.checkCancellation()
+                try request.validate()
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: request.localeIdentifier)
+                formatter.timeZone = currentCalendar.timeZone
+                formatter.dateFormat = request.dateFormat
+                formatter.isLenient = false
+                var monthCalendar = Calendar(identifier: .gregorian)
+                monthCalendar.timeZone = currentCalendar.timeZone
+                var transactions: [Transaction] = []
+                var categories: [URL: Category] = [:]
+                var categoryRows: [URL: Int] = [:]
+                progress(ExpenseImportProgress(phase: .preparing, preparedRows: 0, totalRows: request.rows.count))
+                for index in request.rows.indices {
+                    try control.checkCancellation()
+                    let draft = try request.draft(at: index, formatter: formatter)
+                    guard let reference = draft.category else {
+                        throw ExpenseImportFailure.invalidCategory(row: index + 1)
+                    }
+                    let category: Category
+                    if let cached = categories[reference] { category = cached }
+                    else {
+                        guard reference.scheme == "x-coredata", reference.host != nil,
+                              let id = context.persistentStoreCoordinator?.managedObjectID(forURIRepresentation: reference),
+                              let existing = try context.existingObject(with: id) as? Category, !existing.isDeleted else {
+                            throw ExpenseImportFailure.invalidCategory(row: index + 1)
+                        }
+                        category = existing
+                        categories[reference] = existing
+                    }
+                    if categoryRows[reference] == nil { categoryRows[reference] = index + 1 }
+                    let transaction = Transaction(context: context)
+                    transaction.id = UUID()
+                    transaction.note = draft.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? category.wrappedName : draft.note.trimmingCharacters(in: .whitespaces)
+                    transaction.amount = draft.amount
+                    transaction.category = category
+                    transaction.date = draft.date
+                    transaction.day = currentCalendar.startOfDay(for: draft.date)
+                    transaction.income = draft.income
+                    transaction.month = monthCalendar.date(from: monthCalendar.dateComponents([.month, .year], from: draft.date)) ?? draft.date
+                    transaction.onceRecurring = false
+                    transaction.recurringCoefficient = 1
+                    transaction.recurringType = 0
+                    transactions.append(transaction)
+                    // Bounded notifications, rather than one UI task per row.
+                    if (index + 1).isMultiple(of: 128) || index == request.rows.count - 1 {
+                        progress(ExpenseImportProgress(phase: .preparing, preparedRows: index + 1, totalRows: request.rows.count))
+                    }
+                }
+                // Import never edits category attributes. Merge only their live-version
+                // conflicts, retaining persisted changes; deletion remains an atomic error.
+                let mergePolicy = ExpenseImportMergePolicy(categoryRows: categoryRows)
+                context.mergePolicy = mergePolicy
+#if DEBUG
+                try beforeCommit()
+#endif
+                try control.beginCommit()
+                progress(ExpenseImportProgress(phase: .saving, preparedRows: request.rows.count, totalRows: request.rows.count))
+                do { try context.save() }
+                catch {
+                    // CoreData's Objective-C error bridge erases our domain error type.
+                    if let failure = mergePolicy.failure { throw failure }
+                    throw error
+                }
+                return transactions.map(Self.snapshot)
+            }
+            // CoreData's documented remote-save boundary accepts immutable URI arrays;
+            // no private-context managed objects or save notifications cross queues.
+            NSManagedObjectContext.mergeChanges(fromRemoteContextSave: [
+                NSInsertedObjectsKey: expenses.map(\.reference),
+                NSUpdatedObjectsKey: Array(Set(expenses.compactMap(\.category)))
+            ], into: [viewContext])
+            viewContext.processPendingChanges()
+            didCommit()
+            return expenses
+        } onCancel: {
+            control.cancel()
+        }
+    }
+
     func load() throws -> [Expense] {
         let request = Transaction.fetchRequest()
         request.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
@@ -180,7 +278,7 @@ final class CoreDataExpenseRepository: ExpenseRepository {
         return Self.snapshot(transaction)
     }
 
-    static func snapshot(_ transaction: Transaction) -> Expense {
+    nonisolated static func snapshot(_ transaction: Transaction) -> Expense {
         Expense(reference: transaction.objectID.uriRepresentation(), note: transaction.wrappedNote,
                 amount: transaction.amount, date: transaction.date,
                 category: transaction.category?.objectID.uriRepresentation(), income: transaction.income,
@@ -209,5 +307,35 @@ private final class SaveNotification: Sendable {
 
     func record(_ notification: Notification) {
         value.withLock { $0 = notification }
+    }
+}
+
+/// Only live category revisions may merge during an insert-only import.
+/// Native property merging owns relationship reconciliation; deleted categories
+/// and conflicts involving any other entity fail the entire transaction.
+private final class ExpenseImportMergePolicy: NSMergePolicy {
+    private let categoryRows: [URL: Int]
+    private(set) var failure: ExpenseImportFailure?
+
+    init(categoryRows: [URL: Int]) {
+        self.categoryRows = categoryRows
+        super.init(merge: .mergeByPropertyStoreTrumpMergePolicyType)
+    }
+
+    override func resolve(optimisticLockingConflicts list: [NSMergeConflict]) throws {
+        for conflict in list {
+            guard let category = conflict.sourceObject as? Category,
+                  let row = categoryRows[category.objectID.uriRepresentation()] else {
+                let failure = ExpenseImportFailure.persistence("Concurrent change outside imported categories")
+                self.failure = failure
+                throw failure
+            }
+            guard conflict.newVersionNumber > 0 else {
+                let failure = ExpenseImportFailure.invalidCategory(row: row)
+                self.failure = failure
+                throw failure
+            }
+        }
+        try super.resolve(optimisticLockingConflicts: list)
     }
 }

@@ -832,6 +832,11 @@ private final class FakeRepository: ExpenseRepository {
         didDelete()
     }
 
+    func importExpenses(_ request: ExpenseImportRequest, control: ExpenseImportControl,
+                        progress: @escaping @Sendable (ExpenseImportProgress) -> Void) async throws -> [Expense] {
+        throw ExpenseImportFailure.persistence("Unused import")
+    }
+
     func load() throws -> [Expense] {
         if failLoad { throw ExpenseFailure.persistence("Read unavailable") }
         return records
