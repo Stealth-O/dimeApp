@@ -260,6 +260,103 @@ final class ExpenseTests: XCTestCase {
     }
 
     @MainActor
+    func testDeskDelayFailureRestoresTheLatestProjectionWithoutWriting() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let gate = Their.TestSignal()
+            let repository = FakeRepository()
+            let store = ExpenseStore(repository: repository, deletionDelay: { _ in
+                try await gate.wait()
+                throw ExpenseFailure.persistence("Timer unavailable")
+            })
+            let original = try await self.saved(store, note: "Original", amount: 12)
+            let events = Their.TestEventRecorder<ExpenseState>()
+            let cancel = store.observe(events.append)
+            defer { cancel() }
+            store.beginDeletion(original.reference)
+            _ = try await self.saved(store, note: "Added during Undo", amount: 7)
+            gate.signal()
+            try await events.waitForEvent { $0.deletion.failure != nil }
+            XCTAssertEqual(Set(store.state.expenses.map(\.note)), ["Original", "Added during Undo"])
+            XCTAssertEqual(store.state.deletion.failure, .persistence("Timer unavailable"))
+            XCTAssertTrue(store.state.deletion.references.isEmpty)
+            XCTAssertTrue(repository.deletedBatches.isEmpty)
+            store.clearDeletionFailure()
+            XCTAssertNil(store.state.deletion.failure)
+        }
+    }
+
+    @MainActor
+    func testReentrantUndoDuringDeskPublishDoesNotStartADeadline() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let delay = ManualDeletionDelay()
+            let store = ExpenseStore(repository: FakeRepository(), deletionDelay: delay.sleep)
+            let original = try await self.saved(store, note: "Original", amount: 12)
+            let cancel = store.observe { [weak store] snapshot in
+                if snapshot.deletion.canUndo {
+                    MainActor.assumeIsolated { store?.undoDeletion() }
+                }
+            }
+            defer { cancel() }
+            XCTAssertTrue(store.beginDeletion(original.reference))
+            XCTAssertEqual(store.state.expenses.map(\.reference), [original.reference])
+            XCTAssertFalse(store.state.deletion.canUndo)
+            XCTAssertTrue(delay.requests.events.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testEditorReplacementDuringCommitPublishesOnlyTheCurrentSubmission() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let repository = FakeRepository()
+            let store = ExpenseStore(repository: repository)
+            let editor = ExpenseSubmission()
+            let statuses = Their.TestEventRecorder<ExpenseSubmission.Status>()
+            let observation = editor.$status.sink { statuses.append($0) }
+            defer { observation.cancel() }
+            let draft = self.sampleDraft()
+            repository.didSave = { [weak editor, weak store, weak repository] in
+                guard repository?.saveCount == 1, let editor, let store else { return }
+                editor.cancel()
+                editor.submit(.save(draft, editing: nil), to: store)
+            }
+            editor.submit(.save(draft, editing: nil), to: store)
+            try await statuses.waitForEvent { $0 == .saved }
+            XCTAssertEqual(repository.saveCount, 2)
+            XCTAssertEqual(store.state.expenses.count, 2, "Cancellation cannot undo an already committed save")
+            XCTAssertEqual(statuses.events, [.idle, .saving, .idle, .saving, .saved])
+        }
+    }
+
+    @MainActor
+    func testEditorCancelledBySavingObserverDoesNotStartPersistenceAndCanRetry() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let repository = FakeRepository()
+            let store = ExpenseStore(repository: repository)
+            let editor = ExpenseSubmission()
+            let statuses = Their.TestEventRecorder<ExpenseSubmission.Status>()
+            var cancelled = false
+            let observation = editor.$status.sink { status in
+                statuses.append(status)
+                if status == .saving && !cancelled {
+                    cancelled = true
+                    editor.cancel()
+                }
+            }
+            defer { observation.cancel() }
+            var draft = self.sampleDraft()
+            draft.note = "Cancelled before IO"
+            editor.submit(.save(draft, editing: nil), to: store)
+            XCTAssertEqual(editor.status, .idle)
+            XCTAssertFalse(editor.isSaving)
+            draft.note = "Fresh retry"
+            editor.submit(.save(draft, editing: nil), to: store)
+            try await statuses.waitForEvent { $0 == .saved }
+            XCTAssertEqual(repository.saveCount, 1)
+            XCTAssertEqual(store.state.expenses.map(\.note), ["Fresh retry"])
+        }
+    }
+
+    @MainActor
     func testUndoKeepsNewCommittedExpenseAndUnrelatedUnsavedCategoryEdit() async throws {
         try await Their.stress(count: 10, timeout: .seconds(5)) { @MainActor in
             let delay = ManualDeletionDelay()
@@ -652,6 +749,7 @@ private final class FakeRepository: ExpenseRepository {
     var failSave = false
     var failLoad = false
     var saveCount = 0
+    var didSave: () -> Void = {}
 
     func load() throws -> [Expense] {
         if failLoad { throw ExpenseFailure.persistence("Read unavailable") }
@@ -666,6 +764,7 @@ private final class FakeRepository: ExpenseRepository {
                              recurringCoefficient: draft.recurringCoefficient)
         records.removeAll { $0.reference == record.reference }
         records.append(record)
+        didSave()
         return record
     }
     var failDelete = false

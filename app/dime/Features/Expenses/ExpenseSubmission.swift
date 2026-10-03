@@ -2,46 +2,54 @@ import Combine
 import Foundation
 import TheirCore
 
-/// The editor owns the subscription. A dismissed editor cannot receive a late UI result.
+/// Desk owns the editor's state and Job binding; this adapter publishes on MainActor.
 @MainActor
 final class ExpenseSubmission: ObservableObject {
-    enum Status: Equatable {
+    enum Status: Equatable, Sendable {
         case idle, saving, saved, failed(String)
     }
 
     @Published private(set) var status: Status = .idle
-    var isSaving: Bool { status == .saving }
-    private var generation = 0
-    private var subscription: Their.WorkCancel?
+    var isSaving: Bool { desk.current == .saving }
+    private let desk = Their.Desk<Status>(.idle)
+    private var observation: Their.HubCancel?
 
-    deinit { subscription?() }
-
-    func submit(_ command: ExpenseCommand, to store: ExpenseStore) {
-        guard !isSaving else { return }
-        generation += 1
-        let token = generation
-        status = .saving
-        subscription = store.perform(command).subscribe { [weak self] event in
-            Task { @MainActor [weak self] in
-                guard let self, generation == token else { return }
-                switch event {
-                case .value:
-                    status = .saved
-                    subscription = nil
-                case let .failure(failure):
-                    status = .failed(failure.localizedDescription)
-                    subscription = nil
-                case .finished:
-                    break
-                }
-            }
+    init() {
+        observation = desk.changes.subscribe { [weak self] _ in
+            Task { @MainActor [weak self] in self?.publishCurrent() }
         }
     }
 
+    deinit { observation?() }
+
+    func submit(_ command: ExpenseCommand, to store: ExpenseStore) {
+        guard !isSaving else { return }
+        desk.update { $0 = .saving }
+        desk.bind(store.perform(command), id: "submission") { state, event in
+            switch event {
+            case .value: state = .saved
+            case let .failure(failure): state = .failed(failure.localizedDescription)
+            case .finished: break
+            }
+        }
+        // Install cancellation before a synchronous Combine observer can dismiss us.
+        publishCurrent()
+    }
+
     func cancel() {
-        generation += 1
-        subscription?()
-        subscription = nil
-        status = .idle
+        desk.unbind("submission")
+        desk.update { $0 = .idle }
+        publishCurrent()
+    }
+
+    private func publishCurrent() {
+        // Read after entering the actor: an earlier queued UI callback cannot
+        // overwrite a cancellation or a newer submission with its old snapshot.
+        let current = desk.current
+        if status != current {
+            status = current
+            // @Published calls observers before assigning: reconcile a reentrant cancel.
+            if status != desk.current { publishCurrent() }
+        }
     }
 }

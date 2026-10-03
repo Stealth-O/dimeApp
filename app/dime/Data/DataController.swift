@@ -54,8 +54,13 @@ class DataController: ObservableObject {
             WidgetCenter.shared.reloadAllTimelines()
         }
         let store = ExpenseStore(repository: repository)
-        expenseObservation = store.observe { [weak self] snapshot in
-            MainActor.assumeIsolated { self?.expenseState = snapshot }
+        expenseState = store.state
+        expenseObservation = store.observe { [weak self, weak store] _ in
+            Task { @MainActor [weak self, weak store] in
+                guard let self, let store else { return }
+                let current = store.state
+                if expenseState != current { expenseState = current }
+            }
         }
         return store
     }()

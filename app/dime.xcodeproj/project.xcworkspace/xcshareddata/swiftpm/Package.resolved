@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Stealth-O/TheirCore.git",
       "state" : {
-        "revision" : "842af650e65fcc0dadb8f7dbb80f2693c21c09c1",
-        "version" : "0.1.1"
+        "revision" : "b08d9a4845242f97e6302d03e9b11cc1045e329e",
+        "version" : "0.2.0"
       }
     }
   ],
