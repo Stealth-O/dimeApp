@@ -69,7 +69,7 @@ struct LogView: View {
     @State var progress = 0.0
 
     var body: some View {
-        if transactions.isEmpty {
+        if dataController.visibleTransactions(transactions).isEmpty {
             VStack(spacing: 5) {
                 Image("dropbox")
                     .resizable()
@@ -700,13 +700,14 @@ struct SearchView: View {
 }
 
 struct FilteredSearchView: View {
+    @EnvironmentObject var dataController: DataController
     @SectionedFetchRequest<Date?, Transaction> private var transactions: SectionedFetchResults<Date?, Transaction>
 
     var searchQuery: String
 
     var body: some View {
         VStack {
-            if searchQuery != "" && transactions.count == 0 {
+            if searchQuery != "" && transactions.flatMap({ dataController.visibleTransactions($0) }).isEmpty {
                 VStack(spacing: 2) {
                     Text("📭️")
                         .font(.system(size: 50))
@@ -968,6 +969,7 @@ struct ListView: View {
     @AppStorage("swapTimeLabel", store: UserDefaults(suiteName: "group.com.rafaelsoh.dime")) var swapTimeLabel: Bool = false
 
     @EnvironmentObject var toastPresenter: OverallToastPresenter
+    @EnvironmentObject var dataController: DataController
 
     var body: some View {
         LazyVStack(spacing: 0) {
@@ -975,56 +977,58 @@ struct ListView: View {
                 let filtered = filterOutDupes(day: day)
                 let dateText = dateConverter(date: day.id ?? Date.now).uppercased()
 
-                VStack(spacing: 0) {
-                    VStack(spacing: 4) {
-                        HStack {
-                            Text(dateText)
-                            Spacer()
+                if !filtered.transactions.isEmpty {
+                    VStack(spacing: 0) {
+                        VStack(spacing: 4) {
+                            HStack {
+                                Text(dateText)
+                                Spacer()
 
-                            Text(filtered.string)
-                                .layoutPriority(1)
-                        }
-                        .font(.system(.callout, design: .rounded).weight(.semibold))
-                        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
-//                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundColor(Color.SubtitleText)
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel("\(currencySymbol)\(String(format: "%.2f", filtered.string)) was spent \(dateConverterAccessibilityLabel(date: day.id ?? Date.now))")
-
-                        Line()
-                            .stroke(Color.Outline, style: StrokeStyle(lineWidth: 1.3, lineCap: .round))
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.top, 10)
-
-                    ForEach(filtered.transactions, id: \.id) { transaction in
-                        SingleTransactionView(transaction: transaction, showCents: showCents, currencySymbol: currencySymbol, currency: currency, swapTimeLabel: swapTimeLabel, future: false, showExpenseOrIncomeSign: showExpenseOrIncomeSign)
-                    }
-                }
-                .contentShape(RoundedRectangle(cornerRadius: 10))
-                .contextMenu {
-                    if #available(iOS 16.0, *) {
-                        Button {
-                            guard let image = ImageRenderer(content: SingleDayPhotoView(amountText: filtered.string, dateText: dateText, transactions: filtered.transactions, showCents: showCents, currencySymbol: currencySymbol, currency: currency, swapTimeLabel: swapTimeLabel, future: false)).uiImage else {
-                                return
+                                Text(filtered.string)
+                                    .layoutPriority(1)
                             }
+                            .font(.system(.callout, design: .rounded).weight(.semibold))
+                            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+    //                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .foregroundColor(Color.SubtitleText)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("\(currencySymbol)\(String(format: "%.2f", filtered.string)) was spent \(dateConverterAccessibilityLabel(date: day.id ?? Date.now))")
 
-                            UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+                            Line()
+                                .stroke(Color.Outline, style: StrokeStyle(lineWidth: 1.3, lineCap: .round))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.top, 10)
 
-                            self.toastPresenter.showToast.toggle()
-                        } label: {
-                            Label("Save as Photo", systemImage: "square.and.arrow.up")
+                        ForEach(filtered.transactions, id: \.id) { transaction in
+                            SingleTransactionView(transaction: transaction, showCents: showCents, currencySymbol: currencySymbol, currency: currency, swapTimeLabel: swapTimeLabel, future: false, showExpenseOrIncomeSign: showExpenseOrIncomeSign)
                         }
                     }
+                    .contentShape(RoundedRectangle(cornerRadius: 10))
+                    .contextMenu {
+                        if #available(iOS 16.0, *) {
+                            Button {
+                                guard let image = ImageRenderer(content: SingleDayPhotoView(amountText: filtered.string, dateText: dateText, transactions: filtered.transactions, showCents: showCents, currencySymbol: currencySymbol, currency: currency, swapTimeLabel: swapTimeLabel, future: false)).uiImage else {
+                                    return
+                                }
+
+                                UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+
+                                self.toastPresenter.showToast.toggle()
+                            } label: {
+                                Label("Save as Photo", systemImage: "square.and.arrow.up")
+                            }
+                        }
+                    }
+                    .padding(.bottom, 18)
                 }
-                .padding(.bottom, 18)
             }
         }
     }
 
     func filterOutDupes(day: SectionedFetchResults<Date?, Transaction>.Element) -> (transactions: [Transaction], string: String) {
         var seen = [Transaction]()
-        let filtered = day.filter { entity -> Bool in
+        let filtered = dataController.visibleTransactions(day).filter { entity -> Bool in
             if seen.contains(where: { $0.id == entity.id }) {
                 return false
             } else {
@@ -1071,7 +1075,7 @@ struct FutureListView: View {
             let startOfToday = calendar.startOfDay(for: Date.now)
             let twoWeeksFromStartOfToday = calendar.date(byAdding: .weekOfYear, value: 2, to: startOfToday)!
 
-            let holding = fetchedResults.filter {
+            let holding = dataController.visibleTransactions(fetchedResults).filter {
                 let date = $0.wrappedDate > Date.now ? $0.wrappedDate : $0.nextTransactionDate
 
                 return date < twoWeeksFromStartOfToday
@@ -1085,7 +1089,7 @@ struct FutureListView: View {
             }
 
         } else {
-            return fetchedResults.sorted { itemA, itemB in
+            return dataController.visibleTransactions(fetchedResults).sorted { itemA, itemB in
                 let date1 = itemA.wrappedDate > Date.now ? itemA.wrappedDate : itemA.nextTransactionDate
                 let date2 = itemB.wrappedDate > Date.now ? itemB.wrappedDate : itemB.nextTransactionDate
 
@@ -1342,6 +1346,11 @@ struct SingleTransactionView: View {
             .offset(x: offset)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(transaction.wrappedNote), \(currencySymbol)\(String(format: "%.2f", transaction.wrappedAmount)), Transaction Category: \(transaction.category?.wrappedName ?? "Unknown"), Transaction made at \(timeConverterAccessibilityLabel(date: transaction.wrappedDate))")
+            .accessibilityAction(named: Text(future && transaction.wrappedDate < Date.now && transaction.recurringType > 0 ? "Stop Recurring" : "Delete")) {
+                transactionManager.future = future
+                transactionManager.toDelete = transaction
+                transactionManager.showPopup = true
+            }
         }
         .onChange(of: deletePopup) { _ in
             if deletePopup {
@@ -1383,12 +1392,10 @@ struct SingleTransactionView: View {
                         } else {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                                 withAnimation {
-                                    moc.delete(transaction)
-                                    transactionManager.showToast = true
-                                    transactionManager.toDelete = transaction
-//                                    transactionManager.future = future
-//                                    transactionManager.toDelete = transaction
-//                                    transactionManager.deletionType = .instant
+                                    dataController.expenses.beginDeletion(transaction.objectID.uriRepresentation())
+                                    transactionManager.toDelete = nil
+                                    deleted = false
+                                    offset = 0
                                 }
                             }
                         }
@@ -1524,9 +1531,9 @@ struct DeleteTransactionAlert: View {
                     .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
 //                    .font(.system(size: 25, weight: .medium, design: .rounded))
                     .foregroundColor(.PrimaryText)
-                    .accessibilityLabel("Delete \(unwrappedToDelete.wrappedNote) transaction confirmation. This action cannot be undone.")
+                    .accessibilityLabel(stopRecurring ? "Stop recurring transaction confirmation." : "Delete \(unwrappedToDelete.wrappedNote) transaction confirmation. You can undo this deletion for four seconds.")
 
-                Text(stopRecurring ? "The transaction will no longer be automatically logged." : "This action cannot be undone.")
+                Text(stopRecurring ? "The transaction will no longer be automatically logged." : "You can undo this deletion for four seconds.")
                     .font(.system(.title3, design: .rounded).weight(.medium))
                     .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
 //                    .font(.system(size: 20, weight: .medium, design: .rounded))
@@ -1544,9 +1551,8 @@ struct DeleteTransactionAlert: View {
                         }
                     } else {
                         withAnimation(.easeInOut(duration: 0.5)) {
-                            //                            moc.delete(toDelete)
-                            moc.delete(unwrappedToDelete)
-                            transactionManager.showToast = true
+                            dataController.expenses.beginDeletion(unwrappedToDelete.objectID.uriRepresentation())
+                            transactionManager.toDelete = nil
                         }
                     }
                 } label: {
@@ -1604,11 +1610,12 @@ struct BackgroundBlurView: UIViewRepresentable {
 }
 
 struct FilteredRecurringView: View {
+    @EnvironmentObject var dataController: DataController
     @SectionedFetchRequest<Date?, Transaction> private var transactions: SectionedFetchResults<Date?, Transaction>
 
     var body: some View {
         VStack(spacing: 30) {
-            if transactions.count == 0 {
+            if transactions.flatMap({ dataController.visibleTransactions($0) }).isEmpty {
                 NoResultsView(fullscreen: true)
             }
 
@@ -1632,13 +1639,14 @@ struct FilteredRecurringView: View {
 }
 
 struct FilteredTypeView: View {
+    @EnvironmentObject var dataController: DataController
     @SectionedFetchRequest<Date?, Transaction> private var transactions: SectionedFetchResults<Date?, Transaction>
 
     var income: Bool
 
     var body: some View {
         VStack(spacing: 30) {
-            if transactions.count == 0 {
+            if transactions.flatMap({ dataController.visibleTransactions($0) }).isEmpty {
                 NoResultsView(fullscreen: true)
             }
 
@@ -1663,13 +1671,14 @@ struct FilteredTypeView: View {
 }
 
 struct FilteredCategoryView: View {
+    @EnvironmentObject var dataController: DataController
     @SectionedFetchRequest<Date?, Transaction> private var transactions: SectionedFetchResults<Date?, Transaction>
 
     var category: Category?
 
     var body: some View {
         VStack(spacing: 30) {
-            if transactions.count == 0 || category == nil {
+            if transactions.flatMap({ dataController.visibleTransactions($0) }).isEmpty || category == nil {
                 NoResultsView(fullscreen: true)
             } else {
                 ListView(transactions: _transactions)
@@ -1701,6 +1710,7 @@ struct FilteredCategoryView: View {
 }
 
 struct FilteredDateView: View {
+    @EnvironmentObject var dataController: DataController
     @FetchRequest private var transactions: FetchedResults<Transaction>
 
     var date: Date
@@ -1719,10 +1729,10 @@ struct FilteredDateView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if transactions.count == 0 {
+            if dataController.visibleTransactions(transactions).isEmpty {
                 NoResultsView(fullscreen: true)
             }
-            ForEach(transactions) { transaction in
+            ForEach(dataController.visibleTransactions(transactions)) { transaction in
                 SingleTransactionView(transaction: transaction, showCents: showCents, currencySymbol: currencySymbol, currency: currency, swapTimeLabel: swapTimeLabel, future: false, showExpenseOrIncomeSign: showExpenseOrIncomeSign)
             }
         }

@@ -21,7 +21,6 @@ enum DeletionType {
 class OverallTransactionManager: ObservableObject {
     @Published var toEdit: Transaction?
     @Published var toDelete: Transaction?
-    @Published var showToast: Bool = false
     @Published var showPopup: Bool = false
     @Published var future: Bool = false
 }
@@ -31,7 +30,6 @@ struct HomeView: View {
 
     @StateObject var toastPresenter = OverallToastPresenter()
     @StateObject var transactionManager = OverallTransactionManager()
-    @Environment(\.managedObjectContext) var moc
     @EnvironmentObject var dataController: DataController
 
     @State var currentTab = "Log"
@@ -121,17 +119,22 @@ struct HomeView: View {
         .toast(isPresenting: $toastPresenter.showToast, duration: 4, tapToDismiss: true, offsetY: 12, alert: {
             AlertToast(displayMode: .hud, type: .systemImage("checkmark.circle.fill", Color.IncomeGreen), title: "Image Saved", subTitle: "Check it out in Photos")
         })
-        .toast(isPresenting: $transactionManager.showToast, duration: 4, tapToDismiss: true, offsetY: 12, alert: {
+        .toast(isPresenting: Binding(get: { dataController.expenseState.deletion.canUndo }, set: { _ in }),
+               duration: 0, tapToDismiss: false, offsetY: 12, alert: {
             AlertToast(displayMode: .hud, type: .systemImage("arrow.uturn.backward.circle.fill", Color.AlertRed), title: "Log Deleted", subTitle: "Tap to Undo")
         }, onTap: {
             withAnimation(.easeInOut(duration: 0.5)) {
-                moc.rollback()
+                dataController.expenses.undoDeletion()
             }
-            transactionManager.toDelete = nil
-        }, completion: {
-            dataController.save()
-            transactionManager.toDelete = nil
         })
+        .alert("Couldn't delete this transaction", isPresented: Binding(
+            get: { dataController.expenseState.deletion.failure != nil },
+            set: { if !$0 { dataController.expenses.clearDeletionFailure() } }
+        )) {
+            Button("OK", role: .cancel) { dataController.expenses.clearDeletionFailure() }
+        } message: {
+            Text("Your transactions were restored. Please try again.")
+        }
         .onChange(of: transactionManager.showPopup) { newValue in
             withAnimation {
                 showPopup = newValue

@@ -66,6 +66,15 @@ class DataController: ObservableObject {
     }
 #endif
 
+    /// Bridge retained CoreData rendering to the app owner's pending-deletion projection.
+    func visibleTransactions<S: Sequence>(_ transactions: S) -> [Transaction] where S.Element == Transaction {
+#if DIME_THEIRCORE_EXPENSES
+        return transactions.filter { !expenseState.deletion.references.contains($0.objectID.uriRepresentation()) }
+#else
+        return Array(transactions)
+#endif
+    }
+
     init() {
         let description = NSPersistentStoreDescription()
 
@@ -821,7 +830,7 @@ class DataController: ObservableObject {
 
     func getLogViewTotalSpent(type: Int) -> Double {
         let fetchRequest = fetchRequestForLogView(type: type, optionalIncome: false)
-        let allTransactions = results(for: fetchRequest)
+        let allTransactions = visibleTransactions(results(for: fetchRequest))
 
         var total = 0.0
 
@@ -834,7 +843,7 @@ class DataController: ObservableObject {
 
     func getLogViewTotalIncome(type: Int) -> Double {
         let fetchRequest = fetchRequestForLogView(type: type, optionalIncome: true)
-        let allTransactions = results(for: fetchRequest)
+        let allTransactions = visibleTransactions(results(for: fetchRequest))
 
         var total = 0.0
 
@@ -847,7 +856,7 @@ class DataController: ObservableObject {
 
     func getLogViewTotalNet(type: Int) -> (value: Double, positive: Bool) {
         let fetchRequest = fetchRequestForLogView(type: type, optionalIncome: nil)
-        let allTransactions = results(for: fetchRequest)
+        let allTransactions = visibleTransactions(results(for: fetchRequest))
 
         var total = 0.0
 
@@ -871,7 +880,7 @@ class DataController: ObservableObject {
         let today = calendar.startOfDay(for: Date.now)
 
         let fetchRequest = fetchRequestForLineGraph(optionalIncome: nil)
-        let transactions = results(for: fetchRequest)
+        let transactions = visibleTransactions(results(for: fetchRequest))
 
         var holdingDataPoints = [LineGraphDataPoint]()
         var totalForDay = 0.0
@@ -1027,7 +1036,7 @@ class DataController: ObservableObject {
         let today = calendar.startOfDay(for: Date.now)
 
         let fetchRequest = fetchRequestForLineGraph(optionalIncome: income)
-        let transactions = results(for: fetchRequest)
+        let transactions = visibleTransactions(results(for: fetchRequest))
 
         var holdingDataPoints = [LineGraphDataPoint]()
         var totalForDay = 0.0

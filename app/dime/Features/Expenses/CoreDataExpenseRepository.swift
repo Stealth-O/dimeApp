@@ -18,7 +18,7 @@ final class CoreDataExpenseRepository: ExpenseRepository {
     func load() throws -> [Expense] {
         let request = Transaction.fetchRequest()
         request.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
-        // Include tentative legacy changes, such as the list's undoable deletion.
+        // Retain unrelated tentative legacy edits; deletion previews belong to ExpenseStore.
         return try viewContext.fetch(request).map(Self.snapshot).sorted { lhs, rhs in
             if lhs.date != rhs.date { return (lhs.date ?? .distantPast) > (rhs.date ?? .distantPast) }
             return lhs.reference.absoluteString < rhs.reference.absoluteString
@@ -70,15 +70,22 @@ final class CoreDataExpenseRepository: ExpenseRepository {
         return Self.snapshot(transaction)
     }
 
-    func delete(_ reference: URL) throws {
+    func delete(_ references: [URL]) throws {
+        guard !references.isEmpty else { return }
         writer.reset()
         defer { writer.reset() }
-        writer.delete(try existing(reference, as: Transaction.self))
+        var seen = Set<URL>()
+        for reference in references where seen.insert(reference).inserted {
+            writer.delete(try existing(reference, as: Transaction.self))
+        }
+        // The batch either commits in full or leaves both SQLite and the UI unchanged.
         try commit()
     }
 
     private func existing<T: NSManagedObject>(_ reference: URL, as type: T.Type) throws -> T {
-        guard let id = writer.persistentStoreCoordinator?.managedObjectID(forURIRepresentation: reference),
+        // CoreData raises an Objective-C exception for a non-CoreData URI.
+        guard reference.scheme == "x-coredata", reference.host != nil,
+              let id = writer.persistentStoreCoordinator?.managedObjectID(forURIRepresentation: reference),
               let object = try writer.existingObject(with: id) as? T, !object.isDeleted else {
             throw ExpenseFailure.notFound
         }

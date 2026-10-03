@@ -260,6 +260,334 @@ final class ExpenseTests: XCTestCase {
     }
 
     @MainActor
+    func testUndoKeepsNewCommittedExpenseAndUnrelatedUnsavedCategoryEdit() async throws {
+        try await Their.stress(count: 10, timeout: .seconds(5)) { @MainActor in
+            let delay = ManualDeletionDelay()
+            let fixture = try Fixture(deletionDelay: delay.sleep)
+            defer { try? fixture.close() }
+            let category = fixture.category("Food")
+            try fixture.container.viewContext.save()
+            let original = try await self.saved(fixture.store, note: "Original", amount: 12)
+            XCTAssertTrue(fixture.store.beginDeletion(original.reference))
+            try await delay.requests.waitForEventCount(1)
+            XCTAssertTrue(fixture.store.state.expenses.isEmpty)
+            XCTAssertEqual(self.spent(fixture.store, from: .distantPast), 0)
+
+            _ = try await self.saved(fixture.store, note: "New expense", amount: 7)
+            category.name = "Unsaved category edit"
+            fixture.store.reload()
+            fixture.store.undoDeletion()
+            try await delay.completions.waitForCount(1)
+            XCTAssertEqual(Set(fixture.store.state.expenses.map(\.note)), ["Original", "New expense"])
+            XCTAssertEqual(self.spent(fixture.store, from: .distantPast), 19)
+            XCTAssertEqual(category.name, "Unsaved category edit")
+            XCTAssertTrue(fixture.container.viewContext.hasChanges, "Undo must not save or roll back another feature")
+            XCTAssertFalse(fixture.store.state.deletion.canUndo)
+        }
+    }
+
+    @MainActor
+    func testDeadlineDeletesTheWholeBatchAndSQLiteReopenPreservesIt() async throws {
+        try await Their.stress(count: 10, timeout: .seconds(5)) { @MainActor in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let url = directory.appendingPathComponent("delete.sqlite")
+            let delay = ManualDeletionDelay()
+            var fixture = try Fixture(url: url, deletionDelay: delay.sleep)
+            defer { try? fixture.close() }
+            let first = try await self.saved(fixture.store, note: "First", amount: 10)
+            let second = try await self.saved(fixture.store, note: "Second", amount: 20)
+            let recorder = Their.TestEventRecorder<ExpenseState>()
+            let cancel = fixture.store.observe(recorder.append)
+            defer { cancel() }
+            fixture.store.beginDeletion(first.reference)
+            try await delay.requests.waitForEventCount(1)
+            fixture.store.beginDeletion(second.reference)
+            try await delay.requests.waitForEventCount(2)
+            XCTAssertEqual(delay.requests.events.map(\.nanoseconds), [4_000_000_000, 4_000_000_000])
+            XCTAssertTrue(fixture.store.state.expenses.isEmpty)
+            delay.expire(1)
+            try await recorder.waitForEvent { $0.deletion.references.isEmpty && $0.expenses.isEmpty }
+            let committedIndex = recorder.events.firstIndex { $0.deletion.isCommitting }!
+            XCTAssertTrue(recorder.events[committedIndex...].allSatisfy { $0.expenses.isEmpty }, "Commit must never replay the cached deleted rows")
+            XCTAssertFalse(fixture.container.viewContext.hasChanges)
+            try fixture.close()
+            fixture = try Fixture(url: url)
+            XCTAssertTrue(fixture.store.state.expenses.isEmpty)
+            XCTAssertEqual(self.spent(fixture.store, from: .distantPast), 0)
+        }
+    }
+
+    @MainActor
+    func testDistinctDeletesRestartWindowAndUndoRestoresEntireBatch() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let delay = ManualDeletionDelay()
+            let repository = FakeRepository()
+            let store = ExpenseStore(repository: repository, deletionDelay: delay.sleep)
+            let first = try await self.saved(store, note: "First", amount: 10)
+            let second = try await self.saved(store, note: "Second", amount: 20)
+            XCTAssertTrue(store.beginDeletion(first.reference))
+            try await delay.requests.waitForEventCount(1)
+            XCTAssertFalse(store.beginDeletion(first.reference), "Duplicate deletion must not restart the deadline")
+            XCTAssertEqual(delay.requests.count, 1)
+            XCTAssertTrue(store.beginDeletion(second.reference))
+            try await delay.requests.waitForEventCount(2)
+            try await delay.completions.waitForCount(1)
+            XCTAssertEqual(store.state.deletion.references, [first.reference, second.reference])
+            XCTAssertTrue(store.state.expenses.isEmpty)
+            XCTAssertTrue(repository.deletedBatches.isEmpty)
+            delay.expire(0) // The retired deadline cannot affect the current window.
+            store.undoDeletion()
+            store.undoDeletion()
+            try await delay.completions.waitForCount(2)
+            XCTAssertEqual(Set(store.state.expenses.map(\.note)), ["First", "Second"])
+            XCTAssertTrue(repository.deletedBatches.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testUndoWinsWhenDeadlineWakesBeforeItsActorTurn() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let delay = ManualDeletionDelay()
+            let repository = FakeRepository()
+            let store = ExpenseStore(repository: repository, deletionDelay: delay.sleep)
+            let expense = try await self.saved(store)
+            let recorder = Their.TestEventRecorder<ExpenseState>()
+            let cancel = store.observe(recorder.append)
+            defer { cancel() }
+            store.beginDeletion(expense.reference)
+            try await delay.requests.waitForEventCount(1)
+            delay.expire(0)
+            store.undoDeletion() // No suspension: the deadline's MainActor turn has not run.
+            try await delay.completions.waitForCount(1)
+            XCTAssertEqual(store.state.expenses, [expense])
+            XCTAssertTrue(repository.deletedBatches.isEmpty)
+            store.beginDeletion(expense.reference)
+            try await delay.requests.waitForEventCount(2)
+            delay.expire(1)
+            try await recorder.waitForEvent { $0.deletion.references.isEmpty && $0.expenses.isEmpty }
+            XCTAssertEqual(repository.deletedBatches, [[expense.reference]], "Only the fresh lifecycle may commit")
+            store.undoDeletion()
+            XCTAssertTrue(store.state.expenses.isEmpty, "Undo after a completed commit is a no-op")
+        }
+    }
+
+    @MainActor
+    func testDeletionFailureRestoresWholeBatchAndFreshWindowCanRetry() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let delay = ManualDeletionDelay()
+            let repository = FakeRepository()
+            let store = ExpenseStore(repository: repository, deletionDelay: delay.sleep)
+            let first = try await self.saved(store, note: "First", amount: 10)
+            let second = try await self.saved(store, note: "Second", amount: 20)
+            let recorder = Their.TestEventRecorder<ExpenseState>()
+            let cancel = store.observe(recorder.append)
+            defer { cancel() }
+            repository.failDelete = true
+            store.beginDeletion(first.reference)
+            try await delay.requests.waitForEventCount(1)
+            store.beginDeletion(second.reference)
+            try await delay.requests.waitForEventCount(2)
+            delay.expire(1)
+            try await recorder.waitForEvent { $0.deletion.failure != nil }
+            XCTAssertEqual(store.state.deletion.failure, .persistence("Disk unavailable"))
+            XCTAssertFalse(store.state.deletion.canUndo)
+            XCTAssertEqual(store.state.expenses.count, 2)
+            XCTAssertEqual(self.spent(store, from: .distantPast), 30)
+            XCTAssertTrue(repository.deletedBatches.isEmpty)
+            store.clearDeletionFailure()
+            XCTAssertNil(store.state.deletion.failure)
+            repository.failDelete = false
+            store.beginDeletion(first.reference)
+            try await delay.requests.waitForEventCount(3)
+            store.beginDeletion(second.reference)
+            try await delay.requests.waitForEventCount(4)
+            delay.expire(3)
+            try await recorder.waitForEvent { $0.deletion.references.isEmpty && $0.expenses.isEmpty }
+            XCTAssertEqual(repository.deletedBatches.count, 1)
+            XCTAssertEqual(Set(repository.deletedBatches[0]), [first.reference, second.reference])
+        }
+    }
+
+    @MainActor
+    func testRealReadOnlySQLiteDeletionFailureRestoresVisibleRows() async throws {
+        try await Their.stress(count: 10, timeout: .seconds(5)) { @MainActor in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let url = directory.appendingPathComponent("readonly-delete.sqlite")
+            var fixture = try Fixture(url: url)
+            defer { try? fixture.close() }
+            let expense = try await self.saved(fixture.store, amount: 12)
+            try fixture.close()
+            let delay = ManualDeletionDelay()
+            fixture = try Fixture(url: url, readOnly: true, deletionDelay: delay.sleep)
+            let recorder = Their.TestEventRecorder<ExpenseState>()
+            let cancel = fixture.store.observe(recorder.append)
+            defer { cancel() }
+            fixture.store.beginDeletion(expense.reference)
+            try await delay.requests.waitForEventCount(1)
+            delay.expire(0)
+            try await recorder.waitForEvent { $0.deletion.failure != nil }
+            guard case .persistence = fixture.store.state.deletion.failure else { return XCTFail("Expected SQLite failure") }
+            XCTAssertEqual(fixture.store.state.expenses, [expense])
+            XCTAssertEqual(self.spent(fixture.store, from: .distantPast), 12)
+            XCTAssertFalse(fixture.container.viewContext.hasChanges)
+            try fixture.close()
+            fixture = try Fixture(url: url)
+            XCTAssertEqual(fixture.store.state.expenses, [expense])
+        }
+    }
+
+    @MainActor
+    func testInvalidMemberCannotPartiallyCommitTheDeletionBatch() async throws {
+        try await Their.stress(count: 10, timeout: .seconds(5)) { @MainActor in
+            let fixture = try Fixture()
+            defer { try? fixture.close() }
+            let expense = try await self.saved(fixture.store)
+            var commits = 0
+            let repository = CoreDataExpenseRepository(context: fixture.container.viewContext) { commits += 1 }
+            XCTAssertThrowsError(try repository.delete([expense.reference, URL(string: "missing://expense")!])) { error in
+                XCTAssertEqual(error as? ExpenseFailure, .notFound)
+            }
+            fixture.store.reload()
+            XCTAssertEqual(fixture.store.state.expenses, [expense])
+            XCTAssertEqual(commits, 0)
+            XCTAssertFalse(fixture.container.viewContext.hasChanges)
+        }
+    }
+
+    @MainActor
+    func testEditingAndReloadingPendingRowKeepsItHiddenUntilUndo() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let delay = ManualDeletionDelay()
+            let store = ExpenseStore(repository: FakeRepository(), deletionDelay: delay.sleep)
+            let expense = try await self.saved(store, amount: 10)
+            store.beginDeletion(expense.reference)
+            try await delay.requests.waitForEventCount(1)
+            var draft = self.sampleDraft()
+            draft.note = "Concurrent edit"
+            draft.amount = 25
+            _ = try await self.mutation(store, .save(draft, editing: expense.reference))
+            store.reload()
+            XCTAssertTrue(store.state.expenses.isEmpty)
+            store.undoDeletion()
+            try await delay.completions.waitForCount(1)
+            XCTAssertEqual(store.state.expenses.first?.amount, 25)
+            XCTAssertEqual(store.state.expenses.first?.note, "Concurrent edit")
+        }
+    }
+
+    @MainActor
+    func testAppOwnerCommitsWithNoUIObserversAndReplaysOnlyCurrentState() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let delay = ManualDeletionDelay()
+            let repository = FakeRepository()
+            let committed = Their.TestSignal()
+            repository.didDelete = { committed.signal() }
+            let store = ExpenseStore(repository: repository, deletionDelay: delay.sleep)
+            let expense = try await self.saved(store)
+            let first = Their.TestEventRecorder<ExpenseState>()
+            let second = Their.TestEventRecorder<ExpenseState>()
+            let cancelFirst = store.observe(first.append)
+            let cancelSecond = store.observe(second.append)
+            store.beginDeletion(expense.reference)
+            try await delay.requests.waitForEventCount(1)
+            XCTAssertEqual(first.last, second.last)
+            cancelFirst()
+            cancelSecond()
+            delay.expire(0)
+            try await committed.wait()
+            let late = Their.TestEventRecorder<ExpenseState>()
+            let cancelLate = store.observe(late.append)
+            defer { cancelLate() }
+            XCTAssertEqual(late.events, [store.state])
+            XCTAssertTrue(late.last!.expenses.isEmpty)
+            XCTAssertFalse(late.last!.deletion.canUndo)
+            XCTAssertTrue(first.last!.deletion.canUndo, "Detached observers must receive no commit callback")
+        }
+    }
+
+    @MainActor
+    func testOwnerReleaseCancelsPendingTimerAndLeavesPersistedExpense() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let delay = ManualDeletionDelay()
+            let repository = FakeRepository()
+            var store: ExpenseStore? = ExpenseStore(repository: repository, deletionDelay: delay.sleep)
+            let expense = try await self.saved(store!)
+            store!.beginDeletion(expense.reference)
+            try await delay.requests.waitForEventCount(1)
+            weak var weakStore = store
+            store = nil
+            try await delay.completions.waitForCount(1)
+            XCTAssertNil(weakStore)
+            XCTAssertEqual(repository.records, [expense])
+            XCTAssertTrue(repository.deletedBatches.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testRestartBeforeDeadlineRetainsTheTentativeDeletion() async throws {
+        try await Their.stress(count: 10, timeout: .seconds(5)) { @MainActor in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let url = directory.appendingPathComponent("tentative.sqlite")
+            let delay = ManualDeletionDelay()
+            var fixture: Fixture? = try Fixture(url: url, deletionDelay: delay.sleep)
+            let expense = try await self.saved(fixture!.store)
+            fixture!.store.beginDeletion(expense.reference)
+            try await delay.requests.waitForEventCount(1)
+            XCTAssertTrue(fixture!.store.state.expenses.isEmpty)
+            try fixture!.close()
+            fixture = nil
+            try await delay.completions.waitForCount(1)
+            let reopened = try Fixture(url: url)
+            defer { try? reopened.close() }
+            XCTAssertEqual(reopened.store.state.expenses, [expense], "Only completed deletion commits survive process termination")
+        }
+    }
+
+    @MainActor
+    func testCommittedDeletionDoesNotResurrectCachedRowsWhenReloadFails() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let delay = ManualDeletionDelay()
+            let repository = FakeRepository()
+            let store = ExpenseStore(repository: repository, deletionDelay: delay.sleep)
+            let expense = try await self.saved(store)
+            let recorder = Their.TestEventRecorder<ExpenseState>()
+            let cancel = store.observe(recorder.append)
+            defer { cancel() }
+            repository.didDelete = { repository.failLoad = true }
+            defer { repository.didDelete = {} }
+            store.beginDeletion(expense.reference)
+            try await delay.requests.waitForEventCount(1)
+            delay.expire(0)
+            try await recorder.waitForEvent { $0.deletion.references.isEmpty && $0.failure != nil }
+            XCTAssertTrue(store.state.expenses.isEmpty)
+            XCTAssertEqual(store.state.failure, .persistence("Read unavailable"))
+            XCTAssertNil(store.state.deletion.failure, "The deletion committed successfully; only the refresh failed")
+            XCTAssertEqual(repository.deletedBatches, [[expense.reference]])
+            repository.failLoad = false
+            store.reload()
+            XCTAssertTrue(store.state.expenses.isEmpty)
+            XCTAssertNil(store.state.failure)
+        }
+    }
+
+    @MainActor
+    private func saved(_ store: ExpenseStore, note: String = "Test", amount: Double = 10) async throws -> Expense {
+        var draft = sampleDraft()
+        draft.note = note
+        draft.amount = amount
+        guard case let .saved(expense) = try await mutation(store, .save(draft, editing: nil)) else {
+            throw ExpenseFailure.persistence("Expected saved expense")
+        }
+        return expense
+    }
+
+    @MainActor
     private func mutation(_ store: ExpenseStore, _ command: ExpenseCommand) async throws -> ExpenseMutation {
         for await event in store.perform(command).stream() {
             switch event {
@@ -287,7 +615,8 @@ private final class Fixture {
     let container: NSPersistentContainer
     let store: ExpenseStore
 
-    init(url: URL? = nil, readOnly: Bool = false) throws {
+    init(url: URL? = nil, readOnly: Bool = false,
+         deletionDelay: @escaping @Sendable (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }) throws {
         // Reuse the app's exact model instead of registering competing class/entity descriptions.
         container = NSPersistentContainer(name: "MainModel", managedObjectModel: DataController.shared.container.managedObjectModel)
         let description = NSPersistentStoreDescription()
@@ -299,7 +628,7 @@ private final class Fixture {
         var loadError: Error?
         container.loadPersistentStores { _, error in loadError = error }
         if let loadError { throw loadError }
-        store = ExpenseStore(repository: CoreDataExpenseRepository(context: container.viewContext))
+        store = ExpenseStore(repository: CoreDataExpenseRepository(context: container.viewContext), deletionDelay: deletionDelay)
     }
 
     func category(_ name: String) -> dime.Category {
@@ -321,9 +650,13 @@ private final class Fixture {
 private final class FakeRepository: ExpenseRepository {
     var records: [Expense] = []
     var failSave = false
+    var failLoad = false
     var saveCount = 0
 
-    func load() throws -> [Expense] { records }
+    func load() throws -> [Expense] {
+        if failLoad { throw ExpenseFailure.persistence("Read unavailable") }
+        return records
+    }
     func save(_ draft: ExpenseDraft, editing: URL?) throws -> Expense {
         if failSave { throw ExpenseFailure.persistence("Disk unavailable") }
         saveCount += 1
@@ -335,5 +668,36 @@ private final class FakeRepository: ExpenseRepository {
         records.append(record)
         return record
     }
-    func delete(_ reference: URL) throws { records.removeAll { $0.reference == reference } }
+    var failDelete = false
+    var deletedBatches: [[URL]] = []
+    var didDelete: () -> Void = {}
+    func delete(_ references: [URL]) throws {
+        if failDelete { throw ExpenseFailure.persistence("Disk unavailable") }
+        deletedBatches.append(references)
+        records.removeAll { references.contains($0.reference) }
+        didDelete()
+    }
+}
+
+/// Deterministic deadlines: tests release a specific request instead of sleeping or polling.
+@MainActor
+private final class ManualDeletionDelay {
+    struct Request: Sendable {
+        let nanoseconds: UInt64
+        let gate: Their.TestSignal
+    }
+
+    let requests = Their.TestEventRecorder<Request>()
+    let completions = Their.TestCountRecorder()
+
+    func sleep(_ nanoseconds: UInt64) async throws {
+        let request = Request(nanoseconds: nanoseconds, gate: Their.TestSignal())
+        requests.append(request)
+        defer { _ = completions.increment() }
+        try await request.gate.wait()
+    }
+
+    func expire(_ index: Int) {
+        requests.events[index].gate.signal()
+    }
 }

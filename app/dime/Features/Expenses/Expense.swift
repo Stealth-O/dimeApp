@@ -25,6 +25,17 @@ struct ExpenseDraft: Equatable, Sendable {
 struct ExpenseState: Equatable, Sendable {
     var expenses: [Expense] = []
     var failure: ExpenseFailure?
+    var deletion = ExpenseDeletionState()
+}
+
+/// Pending rows are hidden from app projections, but remain in SQLite until commit.
+/// A new distinct row restarts the shared four-second window; Undo restores the batch.
+struct ExpenseDeletionState: Equatable, Sendable {
+    var references: Set<URL> = []
+    var isCommitting = false
+    var failure: ExpenseFailure?
+
+    var canUndo: Bool { !references.isEmpty && !isCommitting }
 }
 
 enum ExpenseFailure: Error, Equatable, Sendable, LocalizedError {
