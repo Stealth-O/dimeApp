@@ -101,6 +101,63 @@ final class ExpenseTests: XCTestCase {
     }
 
     @MainActor
+    func testBoxDelayFailureRestoresTheLatestProjectionWithoutWriting() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let gate = Their.TestSignal()
+            let repository = FakeRepository()
+            let store = ExpenseStore(repository: repository, deletionDelay: { _ in
+                try await gate.wait()
+                throw ExpenseFailure.persistence("Timer unavailable")
+            })
+            let original = try await self.saved(store, note: "Original", amount: 12)
+            let events = Their.TestEventRecorder<ExpenseState>()
+            let cancel = store.observe(events.append)
+            defer { cancel() }
+            store.beginDeletion(original.reference)
+            _ = try await self.saved(store, note: "Added during Undo", amount: 7)
+            gate.signal()
+            try await events.waitForEvent { $0.deletion.failure != nil }
+            XCTAssertEqual(Set(store.state.expenses.map(\.note)), ["Original", "Added during Undo"])
+            XCTAssertEqual(store.state.deletion.failure, .persistence("Timer unavailable"))
+            XCTAssertTrue(store.state.deletion.references.isEmpty)
+            XCTAssertTrue(repository.deletedBatches.isEmpty)
+            store.clearDeletionFailure()
+            XCTAssertNil(store.state.deletion.failure)
+        }
+    }
+
+    @MainActor
+    func testBoxRefreshFailureRetainsCachedExpensesAndRecoveryReplacesThem() async throws {
+        try await Their.stress(timeout: .seconds(2)) { @MainActor in
+            let repository = FakeRepository()
+            let store = ExpenseStore(repository: repository)
+            let original = try await self.saved(store, note: "Cached expense", amount: 12)
+            let snapshots = Their.TestEventRecorder<ExpenseState>()
+            let cancel = store.observe(snapshots.append)
+            defer { cancel() }
+            repository.failLoad = true
+            store.reload()
+            XCTAssertEqual(store.state.expenses, [original])
+            XCTAssertEqual(store.state.failure, .persistence("Read unavailable"))
+            XCTAssertEqual(snapshots.count, 2)
+            let replacement = Expense(reference: URL(string: "test://expense/reloaded")!,
+                                      note: "Reloaded expense", amount: 25, date: original.date,
+                                      category: original.category, income: false,
+                                      recurringType: 0, recurringCoefficient: 1)
+            repository.records = [replacement]
+            repository.failLoad = false
+            store.reload()
+            XCTAssertEqual(store.state.expenses, [replacement])
+            XCTAssertNil(store.state.failure)
+            XCTAssertEqual(snapshots.count, 3)
+            store.reload()
+            XCTAssertEqual(snapshots.count, 3, "An unchanged projection must not be published twice")
+            XCTAssertEqual(repository.saveCount, 1)
+            XCTAssertTrue(repository.deletedBatches.isEmpty)
+        }
+    }
+
+    @MainActor
     func testBudgetsExcludeIncomeFutureOtherCategoryAndBeforeStart() async throws {
         let fixture = try Fixture()
         defer { try? fixture.close() }
@@ -231,63 +288,6 @@ final class ExpenseTests: XCTestCase {
             try await recorder.waitForEvent { $0.deletion.references.isEmpty && $0.expenses.isEmpty }
             XCTAssertEqual(repository.deletedBatches.count, 1)
             XCTAssertEqual(Set(repository.deletedBatches[0]), [first.reference, second.reference])
-        }
-    }
-
-    @MainActor
-    func testDeskDelayFailureRestoresTheLatestProjectionWithoutWriting() async throws {
-        try await Their.stress(timeout: .seconds(2)) { @MainActor in
-            let gate = Their.TestSignal()
-            let repository = FakeRepository()
-            let store = ExpenseStore(repository: repository, deletionDelay: { _ in
-                try await gate.wait()
-                throw ExpenseFailure.persistence("Timer unavailable")
-            })
-            let original = try await self.saved(store, note: "Original", amount: 12)
-            let events = Their.TestEventRecorder<ExpenseState>()
-            let cancel = store.observe(events.append)
-            defer { cancel() }
-            store.beginDeletion(original.reference)
-            _ = try await self.saved(store, note: "Added during Undo", amount: 7)
-            gate.signal()
-            try await events.waitForEvent { $0.deletion.failure != nil }
-            XCTAssertEqual(Set(store.state.expenses.map(\.note)), ["Original", "Added during Undo"])
-            XCTAssertEqual(store.state.deletion.failure, .persistence("Timer unavailable"))
-            XCTAssertTrue(store.state.deletion.references.isEmpty)
-            XCTAssertTrue(repository.deletedBatches.isEmpty)
-            store.clearDeletionFailure()
-            XCTAssertNil(store.state.deletion.failure)
-        }
-    }
-
-    @MainActor
-    func testDeskRefreshFailureRetainsCachedExpensesAndRecoveryReplacesThem() async throws {
-        try await Their.stress(timeout: .seconds(2)) { @MainActor in
-            let repository = FakeRepository()
-            let store = ExpenseStore(repository: repository)
-            let original = try await self.saved(store, note: "Cached expense", amount: 12)
-            let snapshots = Their.TestEventRecorder<ExpenseState>()
-            let cancel = store.observe(snapshots.append)
-            defer { cancel() }
-            repository.failLoad = true
-            store.reload()
-            XCTAssertEqual(store.state.expenses, [original])
-            XCTAssertEqual(store.state.failure, .persistence("Read unavailable"))
-            XCTAssertEqual(snapshots.count, 2)
-            let replacement = Expense(reference: URL(string: "test://expense/reloaded")!,
-                                      note: "Reloaded expense", amount: 25, date: original.date,
-                                      category: original.category, income: false,
-                                      recurringType: 0, recurringCoefficient: 1)
-            repository.records = [replacement]
-            repository.failLoad = false
-            store.reload()
-            XCTAssertEqual(store.state.expenses, [replacement])
-            XCTAssertNil(store.state.failure)
-            XCTAssertEqual(snapshots.count, 3)
-            store.reload()
-            XCTAssertEqual(snapshots.count, 3, "An unchanged projection must not be published twice")
-            XCTAssertEqual(repository.saveCount, 1)
-            XCTAssertTrue(repository.deletedBatches.isEmpty)
         }
     }
 
@@ -615,7 +615,7 @@ final class ExpenseTests: XCTestCase {
     }
 
     @MainActor
-    func testReentrantUndoDuringDeskPublishDoesNotStartADeadline() async throws {
+    func testReentrantUndoDuringBoxPublishDoesNotStartADeadline() async throws {
         try await Their.stress(timeout: .seconds(2)) { @MainActor in
             let delay = ManualDeletionDelay()
             let store = ExpenseStore(repository: FakeRepository(), deletionDelay: delay.sleep)

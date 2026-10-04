@@ -228,7 +228,7 @@ final class RecurrenceTests: XCTestCase {
     }
 
     @MainActor
-    func testCatchUpFailureRetryAndStopFailureHaveExplicitDeskTransitions() async throws {
+    func testCatchUpFailureRetryAndStopFailureHaveExplicitBoxTransitions() async throws {
         try await Their.stress(timeout: .seconds(2)) { @MainActor in
             let repository = RecurrenceRepository()
             let original = repository.records[0]
@@ -468,7 +468,7 @@ final class RecurrenceTests: XCTestCase {
                     value = true
                     return true
                 }) else { return }
-                // The nested start is queued behind the current Desk reduction.
+                // The nested start is queued behind the current Box reduction.
                 MainActor.assumeIsolated { _ = store?.stopRecurrence(original.reference) }
             }
             defer { observer() }

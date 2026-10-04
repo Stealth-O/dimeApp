@@ -2,11 +2,11 @@ import Combine
 import Foundation
 import TheirCore
 
-/// A fixed Desk reducer owns editor status; this adapter publishes on MainActor.
+/// A fixed Box reducer owns editor status; this adapter publishes on MainActor.
 @MainActor
 final class ExpenseSubmission: ObservableObject {
-    private let desk: Their.Desk<Status, Event>
-    var isSaving: Bool { desk.current == .saving }
+    private let box: Their.Box<Status, Event>
+    var isSaving: Bool { box.current == .saving }
     private var observation: Their.HubCancel?
     @Published private(set) var status: Status = .idle
 
@@ -25,10 +25,10 @@ final class ExpenseSubmission: ObservableObject {
     }
 
     init() {
-        desk = Their.Desk(.idle) { status, event in
+        box = Their.Box(.idle) { status, event in
             Self.reduce(&status, event)
         }
-        observation = desk.changes.subscribe { [weak self] _ in
+        observation = box.changes.subscribe { [weak self] _ in
             Task { @MainActor [weak self] in self?.publishCurrent() }
         }
     }
@@ -36,19 +36,19 @@ final class ExpenseSubmission: ObservableObject {
     deinit { observation?() }
 
     func cancel() {
-        desk.unbind("submission")
-        desk.send(.cancelled)
+        box.unbind("submission")
+        box.send(.cancelled)
         publishCurrent()
     }
 
     private func publishCurrent() {
         // Read after entering the actor: an earlier queued callback cannot
         // overwrite a cancellation or a newer submission with its old snapshot.
-        let current = desk.current
+        let current = box.current
         if status != current {
             status = current
             // @Published calls observers before assigning: reconcile a reentrant cancel.
-            if status != desk.current { publishCurrent() }
+            if status != box.current { publishCurrent() }
         }
     }
 
@@ -63,8 +63,8 @@ final class ExpenseSubmission: ObservableObject {
 
     func submit(_ command: ExpenseCommand, to store: ExpenseStore) {
         guard !isSaving else { return }
-        desk.send(.saveStarted)
-        desk.bind(store.perform(command), id: "submission") { event in
+        box.send(.saveStarted)
+        box.bind(store.perform(command), id: "submission") { event in
             switch event {
             case .value: return .saveSucceeded
             case .failure(let failure): return .saveFailed(failure.localizedDescription)

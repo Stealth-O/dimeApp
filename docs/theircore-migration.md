@@ -2,7 +2,7 @@
 
 This fork is a working migration of Dime, with the upstream UI and CoreData model retained. It is not yet a rewrite of every feature.
 
-Baseline: `rafsoh/dimeApp` main at `0463cb8caba237de781ae02e70a2ec82ae900c67`. The baseline builds with Xcode 26.6 for the iOS 26.5 simulator. TheirCore is pinned to **0.3.0**, commit `122b8efbea284735e1bc094e328f8a28d3004806`. The seven pre-existing Swift package versions remain unchanged. The upstream GPL-3.0 license remains in place.
+Baseline: `rafsoh/dimeApp` main at `0463cb8caba237de781ae02e70a2ec82ae900c67`. The baseline builds with Xcode 26.6 for the iOS 26.5 simulator. TheirCore is pinned to **0.5.0**, commit `94944218d68b37feaf29c5c2e1b8bb3387dc214d`. The seven pre-existing Swift package versions remain unchanged. The upstream GPL-3.0 license remains in place.
 
 ## Implemented routes
 
@@ -12,15 +12,15 @@ List deletion now has an application-owned Undo lifecycle: swipe or confirmation
 
 Main-app recurrence checks now run a fresh, application-owned Job: appearance, foreground or completed sync → catch up persisted series heads → commit all due occurrences atomically → publish current facts. Context-menu, swipe and confirmation stop actions submit the same stop command; they preserve logged history. The retained HomeView alert presents recurrence errors and retries the failed command.
 
-CSV import now sends captured row/category values to an application-owned Job: prepare on a private CoreData queue → report progress → save the entire file once → merge and publish committed facts. Cancellation before the save claim saves no rows; failure/retry and the commit boundary are visible in the expense Desk. The retained wizard presents this state.
+CSV import now sends captured row/category values to an application-owned Job: prepare on a private CoreData queue → report progress → save the entire file once → merge and publish committed facts. Cancellation before the save claim saves no rows; failure/retry and the commit boundary are visible in the expense Box. The retained wizard presents this state.
 
 - `Expense.swift`: immutable expense/draft values, commands, typed failures, deletion/recurrence/import state and pure budget arithmetic. Budget dates are inclusive; income and future transactions are excluded.
-- `ExpenseStore.swift`: `Their.Desk<ExpenseDeskState, ExpenseEvent>` owns the cached database facts, projected snapshot and named deletion, recurrence catch-up, per-reference stop and import Job bindings. One fixed pure reducer handles every domain event; bindings map operation outcomes into typed events. `changes` provides latest replay, while an evolved projection suppresses duplicate UI states. Dropping every UI observer does not erase the owner's state or stop its pending commit.
+- `ExpenseStore.swift`: `Their.Box<ExpenseBoxState, ExpenseEvent>` owns the cached database facts, projected snapshot and named deletion, recurrence catch-up, per-reference stop and import Job bindings. One fixed pure reducer handles every domain event; bindings map operation outcomes into typed events. `changes` provides latest replay, while an evolved projection suppresses duplicate UI states. Dropping every UI observer does not erase the owner's state or stop its pending commit.
 - `ExpenseImport.swift`: immutable request, progress and result values; typed row errors; import state and a lock-protected cancellation/save claim for the private CoreData queue.
 - `ExpenseRecurrence.swift`: one calendar calculation shared by editor catch-up, runtime catch-up and main-app next-date projection. It receives an explicit calendar and date, validates stored intervals, widens weekly arithmetic before multiplying and checks cancellation while collecting due dates.
 - `CoreDataExpenseRepository.swift`: CoreData objects stay inside the adapter. Writes use a separate context, then merge successful commits into the existing UI context. Batch deletion either commits every selected record or none. Failed writes do not leave optimistic changes in the UI or save unrelated tentative edits.
-- `ExpenseSubmission.swift`: a `Their.Desk<Status, Event>` with one fixed pure reducer owns saving/success/failure and the named `"submission"` binding. It blocks duplicate submission and cancels on dismissal. The Combine adapter enters MainActor and reads current state there, so queued older callbacks cannot overwrite a newer submission or cancellation. Cancellation is installed before publishing saving, including reentrant dismissal from a Combine observer.
-- `DataController`: a temporary bridge enters MainActor and publishes the current Desk projection to existing SwiftUI views, with no unsafe actor assumption. It reloads the snapshot after legacy context changes. Its visibility helper masks pending deletion references in retained CoreData lists, log totals and log graphs.
+- `ExpenseSubmission.swift`: a `Their.Box<Status, Event>` with one fixed pure reducer owns saving/success/failure and the named `"submission"` binding. It blocks duplicate submission and cancels on dismissal. The Combine adapter enters MainActor and reads current state there, so queued older callbacks cannot overwrite a newer submission or cancellation. Cancellation is installed before publishing saving, including reentrant dismissal from a Combine observer.
+- `DataController`: a temporary bridge enters MainActor and publishes the current Box projection to existing SwiftUI views, with no unsafe actor assumption. It reloads the snapshot after legacy context changes. Its visibility helper masks pending deletion references in retained CoreData lists, log totals and log graphs.
 - `LogView` / `HomeView`: list rows and confirmation delegate deletion to the owner. The toast only presents the owner's Undo state; it no longer saves or rolls back the shared context. Failed deletion restores the rows and presents an error. Recurrence stop delegates to the owner; failures preserve the record and can retry from the retained alert.
 - `ImportDataView`: capture URI/value input, render owner progress and acknowledged outcomes, cancel preparation or retry the exact request; no per-row legacy saves or unconditional success.
 - `BudgetView`: primary budget numbers and the main budget graph consume current expense state, including the deletion preview, instead of keeping a total calculated only on appearance.
@@ -46,22 +46,22 @@ Undo changes only the pending deletion projection. It does not call `viewContext
 
 | Problem | Decision | Evidence |
 | --- | --- | --- |
-| Shared observation must survive UI detach/reattach | Retain a Desk in the application owner; UI observers subscribe to its changes | Shared observers and zero-observer/reconnect tests |
+| Shared observation must survive UI detach/reattach | Retain a Box in the application owner; UI observers subscribe to its changes | Shared observers and zero-observer/reconnect tests |
 | An editor must not change a managed object while it is still a draft | Send value commands; commit in an isolated CoreData context | Invalid edit and real read-only SQLite failure tests |
 | Saving or undoing one feature must preserve another feature's edits | Merge committed changes without saving the legacy view context; Undo removes only the owner's pending mask | Pending legacy deletion compatibility test; new save and unsaved category edit during Undo test |
-| A UI toast must not own persistence or cancellation | Keep the deadline as a named Desk binding; retain an application generation/cancellation fence immediately before database IO | Distinct deletion, wake-before-actor-turn, owner release and zero-observer commit stress tests |
+| A UI toast must not own persistence or cancellation | Keep the deadline as a named Box binding; retain an application generation/cancellation fence immediately before database IO | Distinct deletion, wake-before-actor-turn, owner release and zero-observer commit stress tests |
 | A deletion batch must not leave partial effects | Resolve and delete all references in the isolated writer before one save | Invalid second reference and real read-only SQLite deletion tests |
 | Job cancellation cannot undo a completed database commit | Check cancellation before IO; publish committed facts even if an editor has gone away or refresh fails; suppress late editor results | Cancellation, editor lifecycle and post-delete reload failure tests |
 | A budget amount must change when an expense changes | Compute totals from the current projected snapshot | CRUD, date/category/income filtering, Undo and SQLite reopen tests |
 | An unsigned fork cannot create the upstream CloudKit monitor | Use an explicit local debug mode, including a non-listening sync monitor | Initial runner crash reproduced; local simulator run succeeds |
 
-IO is outside Desk reducers and Hub evolution. The small CRUD and recurrence CoreData operations run on MainActor, matching the legacy app's confinement. CSV row validation and staging now run on a private CoreData queue; the app explicitly chooses that execution context. TheirCore supplies lifecycle and cancellation and remains scheduleless. Very large recurrence backlogs still need a measured performance migration. The retained CSV selection/column wizard still reads and splits the source file in memory.
+IO is outside Box reducers and Hub evolution. The small CRUD and recurrence CoreData operations run on MainActor, matching the legacy app's confinement. CSV row validation and staging now run on a private CoreData queue; the app explicitly chooses that execution context. TheirCore supplies lifecycle and cancellation and remains scheduleless. Very large recurrence backlogs still need a measured performance migration. The retained CSV selection/column wizard still reads and splits the source file in memory.
 
-## Typed Desk events
+## Typed Box events
 
-TheirCore 0.3.0 fixes one reducer at Desk construction. Dime has two desks: the expense owner and the editor. All their owned state changes enter through typed events; there are no `desk.update` calls or per-binding mutable-state callbacks. Queued bound events keep the core's generation fence, so a replaced or cancelled source cannot apply a result still waiting for reduction. An event already claimed may finish; cancelling cannot undo a committed database write.
+TheirCore 0.3.0 fixes one reducer at Box construction. Dime has two boxs: the expense owner and the editor. All their owned state changes enter through typed events; there are no `box.update` calls or per-binding mutable-state callbacks. Queued bound events keep the core's generation fence, so a replaced or cancelled source cannot apply a result still waiting for reduction. An event already claimed may finish; cancelling cannot undo a committed database write.
 
-For the minimal vocabulary: a **Job** performs one separately owned operation, a **Hub** shares observations, and a **Desk** owns state. **State** describes the current situation; an **Event** describes a request or result; the fixed **reducer** defines its state transition. The editor's Job commits a command, the expense Desk receives the refreshed facts, and its snapshot Hub feeds the retained adapters. A deletion Job owns the application's four-second deadline and reports a timer failure as an event.
+For the minimal vocabulary: a **Job** performs one separately owned operation, a **Hub** shares observations, and a **Box** owns state. **State** describes the current situation; an **Event** describes a request or result; the fixed **reducer** defines its state transition. The editor's Job commits a command, the expense Box receives the refreshed facts, and its snapshot Hub feeds the retained adapters. A deletion Job owns the application's four-second deadline and reports a timer failure as an event.
 
 The expense reducer handles the following events. Each transition finishes by rebuilding the visible projection from the current cached facts and pending deletion references.
 
@@ -82,15 +82,15 @@ Events describe domain actions and read results; they do not carry replacement d
 
 The editor reducer maps `saveStarted → saving`, `saveSucceeded → saved`, `saveFailed(message) → failed(message)` and `cancelled → idle`. `submit` and `cancel` send these events; the Job binding maps a value or failure and ignores `.finished`. Duplicate submission, cancellation before IO and reconciliation of reentrant Combine observers retain their previous behavior.
 
-The existing `ExpenseStateChannel`, manual editor generation and editor Job cancel slot remain removed. CoreData adapters, the transient deletion projection and Undo policy belong to the application. The application's deletion generation remains an IO fence: a synchronous observer can undo or extend a batch before its deadline is installed. Desk's queued-event fence governs state reduction and does not substitute for a check before irreversible IO.
+The existing `ExpenseStateChannel`, manual editor generation and editor Job cancel slot remain removed. CoreData adapters, the transient deletion projection and Undo policy belong to the application. The application's deletion generation remains an IO fence: a synchronous observer can undo or extend a batch before its deadline is installed. Box's queued-event fence governs state reduction and does not substitute for a check before irreversible IO.
 
-The deadline uses an explicit `Their.Job` producer whose Task and reports both run on MainActor. `Job.once` confines only its operation when that closure is annotated; its report after the await may run on another executor. The explicit producer preserves this feature's synchronous actor-confined command behavior. The editor accepts generic Job delivery and bridges current state to MainActor safely. The existing derived Hub only filters repeated output projections; it cannot mutate the Desk's model.
+The deadline uses an explicit `Their.Job` producer whose Task and reports both run on MainActor. `Job.once` confines only its operation when that closure is annotated; its report after the await may run on another executor. The explicit producer preserves this feature's synchronous actor-confined command behavior. The editor accepts generic Job delivery and bridges current state to MainActor safely. The existing derived Hub only filters repeated output projections; it cannot mutate the Box's model.
 
 The 0.3 migration adds explicit domain events and centralizes transitions: `ExpenseStore.swift` is 181 → 198 lines, and `ExpenseSubmission.swift` is 55 → 77. This stage improves visibility of the state rules rather than reducing line count. It adds no scheduler to TheirCore and makes no SwiftUI architecture change.
 
 ## Recurrence contract
 
-`ExpenseCommand.catchUpRecurrences` and `stopRecurrence(reference)` use the same effect boundary as editor commands. Automatic calls bind fresh Jobs to the expense Desk: one catch-up binding coalesces overlapping checks, and each stop reference has its own binding so independent stops cannot cancel each other. `ExpenseRecurrenceState` exposes running operations, the last failed operation and its typed failure. Tokens, committed successor links and cached rows stay in `ExpenseDeskState`; only the fixed reducer changes them.
+`ExpenseCommand.catchUpRecurrences` and `stopRecurrence(reference)` use the same effect boundary as editor commands. Automatic calls bind fresh Jobs to the expense Box: one catch-up binding coalesces overlapping checks, and each stop reference has its own binding so independent stops cannot cancel each other. `ExpenseRecurrenceState` exposes running operations, the last failed operation and its typed failure. Tokens, committed successor links and cached rows stay in `ExpenseBoxState`; only the fixed reducer changes them.
 
 | Request or outcome | Contract |
 | --- | --- |
@@ -107,19 +107,19 @@ The 0.3 migration adds explicit domain events and centralizes transitions: `Expe
 | Refresh fails after commit | Apply immutable committed row facts and successor links first; keep them and expose the read failure, instead of reverting to stale rows |
 | UI observers detach / owner releases | The retained owner continues without UI observers; a late observer receives current state. Releasing the owner cancels outstanding work and does not retain it through a preparation wait |
 
-A `recurrenceStarted(operation, token)` event may be queued when requested from a synchronous observer. The IO adapter claims that token on its MainActor turn, rather than reading `current` immediately after `send` as an acknowledgement. `recurrenceEnded` retires only its matching token; `recurrencesCancelled` also clears starts queued behind an observer. `mutationCommitted` always publishes database facts, including when cancellation happened during the commit. This distinction keeps Desk's state fencing separate from the check before irreversible IO.
+A `recurrenceStarted(operation, token)` event may be queued when requested from a synchronous observer. The IO adapter claims that token on its MainActor turn, rather than reading `current` immediately after `send` as an acknowledgement. `recurrenceEnded` retires only its matching token; `recurrencesCancelled` also clears starts queued behind an observer. `mutationCommitted` always publishes database facts, including when cancellation happened during the commit. This distinction keeps Box's state fencing separate from the check before irreversible IO.
 
 The calendar and date are injected into the repository and captured once per catch-up batch. The existing foreground, appearance and sync triggers remain application policy; there is no new scheduler or persistent timer in TheirCore. The synchronous CoreData save callback is recorded under `Their.Lock` and merged on the feature actor, replacing the adapter's previous `MainActor.assumeIsolated`. Test-only preparation and completion seams are behind `#if DEBUG` and absent from Release.
 
-This feature uses the published TheirCore 0.3.0 API without changing the library. The expense owner grows from 198 to 355 lines as it adds explicit recurrence lifecycle and successor routing. Declaration sorting in retained DataController/views preserves existing initializer signatures. A SwiftSyntax token comparison confirms that unrelated method/property bodies and all 29 existing test scenarios retain their code; the functional changes in those retained adapters are the recurrence calls and error/retry presentation.
+The recurrence stage used the published TheirCore 0.3.0 API without changing the library. The expense owner grows from 198 to 355 lines as it adds explicit recurrence lifecycle and successor routing. Declaration sorting in retained DataController/views preserves existing initializer signatures. A SwiftSyntax token comparison confirms that unrelated method/property bodies and all 29 existing test scenarios retain their code; the functional changes in those retained adapters are the recurrence calls and error/retry presentation.
 
 Successor links are transient routing for commands already queued in this process. This stage adds no persistent series identity and does not verify simultaneous CloudKit recurrence processing on different devices. There is no CoreData schema migration.
 
 ## CSV import contract
 
-The existing wizard captures `ExpenseImportRequest`: string rows, four column indices, date format/locale and category URI/income values. It sends that request to the same retained `ExpenseStore` as CRUD and recurrence. No `NSManagedObject` crosses into a Job or Desk. The fixed expense reducer owns `ExpenseImportState`, the active token and the exact retry request.
+The existing wizard captures `ExpenseImportRequest`: string rows, four column indices, date format/locale and category URI/income values. It sends that request to the same retained `ExpenseStore` as CRUD and recurrence. No `NSManagedObject` crosses into a Job or Box. The fixed expense reducer owns `ExpenseImportState`, the active token and the exact retry request.
 
-One fresh Job emits `progress` values and a terminal `committed(count)` value or typed failure. Preparation reports every 128 rows, plus the initial and final boundaries. A MainActor bridge delivers reports; late/out-of-order progress cannot decrease the prepared count or overwrite a terminal outcome. A named Desk binding owns the Job. No extra TheirCore primitive or scheduler is introduced.
+One fresh Job emits `progress` values and a terminal `committed(count)` value or typed failure. Preparation reports every 128 rows, plus the initial and final boundaries. A MainActor bridge delivers reports; late/out-of-order progress cannot decrease the prepared count or overwrite a terminal outcome. A named Box binding owns the Job. No extra TheirCore primitive or scheduler is introduced.
 
 | Request or outcome | Contract |
 | --- | --- |
@@ -142,7 +142,25 @@ A paused private context initially exposed an optimistic-lock conflict when an e
 
 The screen renders owner state, exposes Cancel during preparation and Try Again / Review Import after failure or cancellation. Its previous unconditional delayed success is removed; success and confetti follow only a completed database commit. Existing file/category-selection UI remains in place. Category creation during the selection wizard is separate from the expense transaction. The parser retains Dime's simple comma-separated format; quoted commas and multiline CSV fields are outside this migration. Ragged rows are rejected before the wizard indexes their columns. Both the request and staging remain proportional to file size in memory.
 
-Retry protection applies to one owner's acknowledged lifecycle. Deliberately importing a file again is a new import; this stage adds no persistent file receipt/idempotency ledger or cross-device duplicate policy. It changes neither the CoreData model nor the published TheirCore 0.3.0 package pin. The Swift declaration reorder preserves retained initializer signatures; a SwiftSyntax token comparison shows 58 unchanged view members and functional changes confined to the import body, import command and ragged-row guard.
+Retry protection applies to one owner's acknowledged lifecycle. Deliberately importing a file again is a new import; this stage adds no persistent file receipt/idempotency ledger or cross-device duplicate policy. The CSV stage changed neither the CoreData model nor the then-published TheirCore 0.3.0 package pin. The Swift declaration reorder preserves retained initializer signatures; a SwiftSyntax token comparison shows 58 unchanged view members and functional changes confined to the import body, import command and ragged-row guard.
+
+## Box name migration
+
+TheirCore 0.5.0 renames the state owner from `Their.Desk` to `Their.Box` with
+no compatibility alias. The expense owner and submission adapter now use Box;
+their fixed reducers, typed events and Job/Hub ownership retain the same behavior.
+The private snapshot model is named `ExpenseBoxState`. The seven other package
+versions, CoreData model and UI behavior remain unchanged. Historical checks
+below retain the package versions and names that were verified at each stage.
+
+Verified on 2026-10-04 with Xcode 26.6 and iOS 26.5: all **78 tests** pass
+against the exact published **TheirCore 0.5.0** pin, and the Release simulator
+build succeeds. The expense and recurrence scenarios differ only by Box names
+and declaration order; the import scenarios are unchanged. The published
+checkout matches the library sources tested before release. The seven other
+pins and CoreData model are unchanged. The same test suite and Release build
+also passed against the local candidate before package publication. This name
+migration adds no new manual interface checks.
 
 ## Run and verify
 

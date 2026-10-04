@@ -1748,7 +1748,7 @@
 		E10000000000000000000001 /* XCRemoteSwiftPackageReference "TheirCore" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/Stealth-O/TheirCore.git";
-			requirement = { kind = exactVersion; version = 0.3.0; };
+			requirement = { kind = exactVersion; version = 0.5.0; };
 		};
 /* End XCRemoteSwiftPackageReference section */
 

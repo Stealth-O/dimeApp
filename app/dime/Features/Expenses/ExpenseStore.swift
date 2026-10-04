@@ -12,13 +12,13 @@ protocol ExpenseRepository: AnyObject {
     func stopRecurrence(_ reference: URL) throws -> Expense
 }
 
-/// One fixed Desk reducer owns the snapshot; the application owns IO and Undo policy.
+/// One fixed Box reducer owns the snapshot; the application owns IO and Undo policy.
 @MainActor
 final class ExpenseStore {
+    private let box: Their.Box<ExpenseBoxState, ExpenseEvent>
     private let deletionDelay: @Sendable (UInt64) async throws -> Void
     // Domain fence before irreversible IO, including reentrant Undo during publish.
     private var deletionGeneration = 0
-    private let desk: Their.Desk<ExpenseDeskState, ExpenseEvent>
 #if DEBUG
     var importTaskFinishedForTests: @Sendable () -> Void = {}
 #endif
@@ -28,18 +28,18 @@ final class ExpenseStore {
     var recurrenceTaskFinishedForTests: @Sendable () -> Void = {}
 #endif
     private let repository: any ExpenseRepository
-    var state: ExpenseState { desk.current.snapshot }
+    var state: ExpenseState { box.current.snapshot }
     private let states: Their.Hub<ExpenseState, Never>
 
     init(repository: any ExpenseRepository,
          deletionDelay: @escaping @Sendable (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }) {
         self.repository = repository
         self.deletionDelay = deletionDelay
-        let desk = Their.Desk<ExpenseDeskState, ExpenseEvent>(ExpenseDeskState()) { model, event in
+        let box = Their.Box<ExpenseBoxState, ExpenseEvent>(ExpenseBoxState()) { model, event in
             Self.reduce(&model, event)
         }
-        self.desk = desk
-        states = desk.changes.evolve(initial: ExpenseState?.none) { previous, model -> ExpenseState? in
+        self.box = box
+        states = box.changes.evolve(initial: ExpenseState?.none) { previous, model -> ExpenseState? in
             guard previous != model.snapshot else { return nil }
             previous = model.snapshot
             return model.snapshot
@@ -52,11 +52,11 @@ final class ExpenseStore {
     func beginDeletion(_ reference: URL) -> Bool {
         guard !state.deletion.isCommitting,
               !state.deletion.references.contains(reference),
-              desk.current.loadedExpenses.contains(where: { $0.reference == reference }) else { return false }
+              box.current.loadedExpenses.contains(where: { $0.reference == reference }) else { return false }
         deletionGeneration += 1
         let generation = deletionGeneration
-        desk.unbind("deletion")
-        desk.send(.deletionRequested(reference))
+        box.unbind("deletion")
+        box.send(.deletionRequested(reference))
         // A synchronous observer may have undone or extended the batch.
         guard deletionGeneration == generation else { return true }
         let delay = deletionDelay
@@ -77,7 +77,7 @@ final class ExpenseStore {
             }
             return { task.cancel() }
         }
-        desk.bind(job, id: "deletion") { event in
+        box.bind(job, id: "deletion") { event in
             if case .failure(let failure) = event { return .deletionDelayFailed(failure) }
             return nil
         }
@@ -87,19 +87,19 @@ final class ExpenseStore {
     /// Retain the token until the worker acknowledges cancellation or a claimed save.
     func cancelImport() {
         // Also cancel a start queued by a reentrant observer and not yet reduced.
-        desk.unbind("import")
-        desk.send(.importCancellationRequested)
+        box.unbind("import")
+        box.send(.importCancellationRequested)
     }
 
     /// Cancels owned work; committed rows and persisted recurrence settings survive.
     func cancelRecurrences() {
-        for (operation, token) in desk.current.recurrenceOperations {
-            guard desk.current.recurrenceOperations[operation] == token else { continue }
-            desk.unbind(operation.bindingID)
-            desk.send(.recurrenceEnded(operation, token, failure: nil))
+        for (operation, token) in box.current.recurrenceOperations {
+            guard box.current.recurrenceOperations[operation] == token else { continue }
+            box.unbind(operation.bindingID)
+            box.send(.recurrenceEnded(operation, token, failure: nil))
         }
         // Also clear starts queued by a reentrant observer but not yet reduced.
-        desk.send(.recurrencesCancelled)
+        box.send(.recurrencesCancelled)
     }
 
     @discardableResult
@@ -108,26 +108,26 @@ final class ExpenseStore {
     }
 
     func clearDeletionFailure() {
-        desk.send(.deletionFailureCleared)
+        box.send(.deletionFailureCleared)
     }
 
     func clearImport() {
         guard !state.importState.isRunning else { return }
-        desk.send(.importCleared)
+        box.send(.importCleared)
     }
 
     func clearRecurrenceFailure() {
-        desk.send(.recurrenceFailureCleared)
+        box.send(.recurrenceFailureCleared)
     }
 
     private func commitDeletion() {
         guard state.deletion.canUndo else { return }
         let references = state.deletion.references
-        desk.send(.deletionCommitStarted)
+        box.send(.deletionCommitStarted)
         do {
             try repository.delete(references.sorted { $0.absoluteString < $1.absoluteString })
             // Keep known committed facts even if the following read fails.
-            desk.send(.deletionCommitted(references))
+            box.send(.deletionCommitted(references))
             finishDeletion(failure: nil)
         } catch {
             finishDeletion(failure: ExpenseFailure(error))
@@ -146,28 +146,28 @@ final class ExpenseStore {
         case .save(let draft, let reference):
             mutation = .saved(try repository.save(draft, editing: reference))
         case .stopRecurrence(let reference):
-            let current = desk.current.resolve(reference)
+            let current = box.current.resolve(reference)
             guard !state.deletion.references.contains(current) else { throw ExpenseFailure.notFound }
             mutation = .recurrenceStopped(try repository.stopRecurrence(current))
         }
         // A refresh failure cannot discard known committed facts. IO is outside the reducer.
-        desk.send(.mutationCommitted(mutation, refresh: readExpenses()))
+        box.send(.mutationCommitted(mutation, refresh: readExpenses()))
         return mutation
     }
 
     private func finishDeletion(failure: ExpenseFailure?) {
         // Clear the projection and reload atomically: no stale row flashes after commit.
-        desk.send(.deletionFinished(refresh: readExpenses(), failure: failure))
+        box.send(.deletionFinished(refresh: readExpenses(), failure: failure))
     }
 
-    /// All this feature's Desk inputs are delivered on MainActor; cancellation is thread-safe.
+    /// All this feature's Box inputs are delivered on MainActor; cancellation is thread-safe.
     func observe(_ sink: @escaping @Sendable (ExpenseState) -> Void) -> Their.HubCancel {
         states.subscribe { event in
             if case .value(let state) = event { sink(state) }
         }
     }
 
-    /// Each command creates one fresh, cancellable Job. IO runs outside Desk reducers.
+    /// Each command creates one fresh, cancellable Job. IO runs outside Box reducers.
     func perform(_ command: ExpenseCommand) -> Their.Job<ExpenseMutation, ExpenseFailure> {
         .once(failure: { ExpenseFailure($0) }) { @MainActor [self] in
             try execute(command)
@@ -179,7 +179,7 @@ final class ExpenseStore {
         catch { return .failure(ExpenseFailure(error)) }
     }
 
-    private nonisolated static func reduce(_ model: inout ExpenseDeskState, _ event: ExpenseEvent) {
+    private nonisolated static func reduce(_ model: inout ExpenseBoxState, _ event: ExpenseEvent) {
         switch event {
         case .deletionCommitStarted:
             model.snapshot.deletion.isCommitting = true
@@ -260,11 +260,11 @@ final class ExpenseStore {
     }
 
     func reload() {
-        desk.send(.refreshed(readExpenses()))
+        box.send(.refreshed(readExpenses()))
     }
 
     func retryImport() {
-        guard state.importState.canRetry, let request = desk.current.importRequest else { return }
+        guard state.importState.canRetry, let request = box.current.importRequest else { return }
         startImport(request)
     }
 
@@ -282,14 +282,14 @@ final class ExpenseStore {
 #if DEBUG
         let finished = importTaskFinishedForTests
 #endif
-        desk.send(.importStarted(token, request))
+        box.send(.importStarted(token, request))
         let job = Their.Job<ExpenseImportOutput, ExpenseImportFailure> { [weak self] report in
             let control = ExpenseImportControl()
             let task = Task { @MainActor [weak self] in
 #if DEBUG
                 defer { finished() }
 #endif
-                guard self?.desk.current.importToken == token else {
+                guard self?.box.current.importToken == token else {
                     report(.finished)
                     return
                 }
@@ -311,7 +311,7 @@ final class ExpenseStore {
                     let refresh: Result<[Expense], ExpenseFailure>?
                     if case .success = result { refresh = self.readExpenses() }
                     else { refresh = nil }
-                    self.desk.send(.importFinished(token, result, refresh: refresh))
+                    self.box.send(.importFinished(token, result, refresh: refresh))
                 }
                 switch result {
                 case .failure(let failure): report(.failure(failure))
@@ -322,7 +322,7 @@ final class ExpenseStore {
             }
             return { control.cancel(); task.cancel() }
         }
-        desk.bind(job, id: "import") { event in
+        box.bind(job, id: "import") { event in
             if case .value(.progress(let progress)) = event { return .importProgressed(token, progress) }
             return nil
         }
@@ -331,11 +331,11 @@ final class ExpenseStore {
 
     @discardableResult
     private func startRecurrence(_ operation: ExpenseRecurrenceOperation) -> Bool {
-        guard desk.current.recurrenceOperations[operation] == nil else { return false }
+        guard box.current.recurrenceOperations[operation] == nil else { return false }
         let token = UUID()
-        desk.send(.recurrenceStarted(operation, token))
+        box.send(.recurrenceStarted(operation, token))
         // A reentrant send can be queued. Claim the reduced token on the actor turn,
-        // rather than treating desk.current immediately after send as an acknowledgement.
+        // rather than treating box.current immediately after send as an acknowledgement.
 #if DEBUG
         let preparation = recurrencePreparationForTests
         let finished = recurrenceTaskFinishedForTests
@@ -345,7 +345,7 @@ final class ExpenseStore {
 #if DEBUG
                 defer { finished() }
 #endif
-                guard self?.desk.current.recurrenceOperations[operation] == token else {
+                guard self?.box.current.recurrenceOperations[operation] == token else {
                     report(.finished)
                     return
                 }
@@ -354,7 +354,7 @@ final class ExpenseStore {
                     try await preparation()
 #endif
                     try Task.checkCancellation()
-                    guard let self, self.desk.current.recurrenceOperations[operation] == token else {
+                    guard let self, self.box.current.recurrenceOperations[operation] == token else {
                         report(.finished)
                         return
                     }
@@ -367,7 +367,7 @@ final class ExpenseStore {
             }
             return { task.cancel() }
         }
-        desk.bind(job, id: operation.bindingID) { event in
+        box.bind(job, id: operation.bindingID) { event in
             switch event {
             case .failure(let failure): return .recurrenceEnded(operation, token, failure: failure)
             case .value: return .recurrenceEnded(operation, token, failure: nil)
@@ -386,14 +386,14 @@ final class ExpenseStore {
     func undoDeletion() {
         guard state.deletion.canUndo else { return }
         deletionGeneration += 1
-        desk.unbind("deletion")
+        box.unbind("deletion")
         // Reload includes other committed and tentative edits; Undo changes no context.
-        desk.send(.deletionUndone(readExpenses()))
+        box.send(.deletionUndone(readExpenses()))
     }
 }
 
 /// Cached database facts and their transient projection form one value snapshot.
-private struct ExpenseDeskState: Sendable {
+private struct ExpenseBoxState: Sendable {
     var importRequest: ExpenseImportRequest?
     var importToken: UUID?
     var loadedExpenses: [Expense] = []
